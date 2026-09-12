@@ -20,6 +20,8 @@ class HealthResponse(BaseModel):
     # Lets a frontend decide whether to show a login screen without a second request.
     auth_enabled: bool = False
     ocr_available: bool = False
+    max_upload_bytes: int = 0
+    registration_enabled: bool = False
 
 
 class InspectResponse(BaseModel):
@@ -88,6 +90,7 @@ class CheckResponse(BaseModel):
     columns: list[ColumnResultModel]
     warnings: list[str] = Field(default_factory=list)
     report_urls: ReportUrls
+    timings: dict[str, float] = Field(default_factory=dict)
 
 
 class ErrorResponse(BaseModel):
@@ -98,8 +101,8 @@ class ErrorResponse(BaseModel):
 
 # ---- Auth (optional feature) ------------------------------------------------
 class Credentials(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class AuthUser(BaseModel):

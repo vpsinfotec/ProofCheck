@@ -62,8 +62,8 @@ def _secret() -> bytes:
 
 def _session_seconds() -> int:
     try:
-        return int(float(os.environ.get("PROOFCHECK_SESSION_HOURS", "12")) * 3600)
-    except (TypeError, ValueError):
+        return max(60, min(7 * 86400, int(float(os.environ.get("PROOFCHECK_SESSION_HOURS", "12")) * 3600)))
+    except (TypeError, ValueError, OverflowError):
         return 12 * 3600
 
 
@@ -107,17 +107,17 @@ def make_token(username: str) -> str:
 
 def verify_token(token: str | None) -> str | None:
     """Return the username for a valid, unexpired token, else ``None``."""
-    if not token or "." not in token:
+    if not token or len(token) > 4096 or "." not in token:
         return None
     body, _, sig = token.partition(".")
-    expected = hmac.new(_secret(), body.encode("ascii"), hashlib.sha256).digest()
     try:
+        expected = hmac.new(_secret(), body.encode("ascii"), hashlib.sha256).digest()
         if not hmac.compare_digest(_b64d(sig), expected):
             return None
         username, _, expiry = _b64d(body).decode("utf-8").rpartition(":")
-        if not username or _now() > int(expiry):
+        if not username or _now() >= int(expiry):
             return None
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeError):
         return None
     return username
 
@@ -132,7 +132,7 @@ def current_user(proofcheck_session: str | None = Cookie(default=None)) -> str:
     if not auth_enabled():
         return ANONYMOUS
     username = verify_token(proofcheck_session)
-    if username is None:
+    if username is None or store.get_user(username) is None:
         raise HTTPException(status_code=401, detail="Authentication required.")
     return username
 
@@ -150,6 +150,8 @@ def authenticate(username: str, password: str) -> bool:
 def register_user(username: str, password: str) -> None:
     """Create a new user. Raises ``ValueError`` on duplicate or invalid input."""
     username = (username or "").strip()
+    if len(username) > 128 or len(password) > 1024 or ":" in username:
+        raise ValueError("Username must be at most 128 characters with no colon; password at most 1024 characters.")
     if not username or not password:
         raise ValueError("Username and password are required.")
     if len(password) < 8:

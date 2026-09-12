@@ -20,6 +20,7 @@ import json
 import os
 import sqlite3
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,18 +33,23 @@ def db_path() -> Path:
     return Path(tempfile.gettempdir()) / "proofcheck" / "proofcheck.db"
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connect():
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
     """Create the schema if it doesn't exist. Idempotent and safe to call repeatedly."""
     with _connect() as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
