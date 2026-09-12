@@ -9,8 +9,8 @@ Every call opens its own short-lived connection, which is the simplest correct p
 under FastAPI's threadpool (each worker thread gets its own connection). Schema creation
 is idempotent (``CREATE TABLE IF NOT EXISTS``) so there is no separate migration step.
 
-This module stores only **non-PII run metadata** (filenames + summary counts + flags) so
-history survives the short-lived report cache. The uploaded spreadsheets/PDFs themselves
+This module stores run metadata (filenames + summary counts + flags) so
+history survives the short-lived report cache. Filenames may contain PII. The uploaded spreadsheets/PDFs themselves
 are still deleted immediately after each run, exactly as before.
 """
 

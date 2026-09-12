@@ -7,7 +7,7 @@ caller can warn and skip them.
 When ``ocr=True`` those no-text-layer pages are handed to :mod:`proofcheck.ocr`, which
 renders and runs Tesseract over them. OCR is optional and deterministic (same image +
 DPI -> same text); if the OCR libraries/engine are missing the pages stay warned +
-skipped exactly as before. We still never *guess* — OCR only recovers real glyphs.
+skipped with warnings. OCR may misread glyphs; review difficult inputs.
 """
 
 from __future__ import annotations
@@ -161,6 +161,9 @@ def _apply_ocr(result: PdfText, path: str, *, dpi: int, lang: str, psm: int = 6,
     digest = ocr_cache.file_sha256(path) if use_cache else None
     recovered = ocr_cache.load(digest, dpi=dpi, lang=lang, psm=psm) if use_cache else None
 
+    if recovered is not None and not set(result.empty_pages).issubset(recovered):
+        recovered = None  # Incomplete cache entries cannot suppress retries.
+    succeeded = recovered is not None
     if recovered is not None:
         result.ocr_from_cache = True  # cache hit: unchanged file, skip OCR entirely
     else:
@@ -169,11 +172,17 @@ def _apply_ocr(result: PdfText, path: str, *, dpi: int, lang: str, psm: int = 6,
             return
         try:
             recovered = ocr_mod.ocr_pages(path, list(result.empty_pages), dpi=dpi, lang=lang, psm=psm)
+            succeeded = True
         except ocr_mod.OcrError as exc:
             result.ocr_error = str(exc)
-            return
-        if use_cache and digest is not None:
-            ocr_cache.store(digest, dpi=dpi, lang=lang, pages=recovered, psm=psm)
+            recovered = exc.partial
+            if not recovered:
+                return
+    total = sum(len(recovered.get(n, text)) for n, text in result.pages.items())
+    if total > MAX_TEXT_CHARS:
+        raise PdfError(f"Document exceeds {MAX_TEXT_CHARS} extracted characters after OCR.")
+    if succeeded and not result.ocr_from_cache and use_cache and digest is not None:
+        ocr_cache.store(digest, dpi=dpi, lang=lang, pages=recovered, psm=psm)
 
     still_empty: list[int] = []
     for p in result.empty_pages:

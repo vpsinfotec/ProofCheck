@@ -26,7 +26,7 @@ def _fail(message: str) -> None:
 @click.group()
 @click.version_option(__version__, prog_name="proofcheck")
 def cli() -> None:
-    """ProofCheck — verify that Excel values appear in a PDF (deterministic, no AI)."""
+    """ProofCheck — verify that Excel values appear in a PDF (local processing)."""
 
 
 @cli.command()

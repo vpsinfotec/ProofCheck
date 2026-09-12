@@ -1,8 +1,8 @@
 """Optional, deterministic OCR fallback for PDF pages with no text layer.
 
-ProofCheck's defining rule is **100% deterministic, no AI/LLM/ML, offline**. Classic
-Tesseract OCR fits that rule: it is a fixed, offline glyph recogniser, not a learned
-generative model, and the same image rendered the same way always yields the same text.
+Recognition runs locally using Tesseract's trained models. It makes no cloud/LLM
+calls; reproducibility requires fixed engine/language data and settings. OCR may
+misread or omit characters and should be reviewed on difficult artwork.
 
 **Engine (tuned for accuracy + robustness).** Each page is rendered with pypdfium2, then
 OCR is attempted with several deterministic *strategies* and the most confident result is
@@ -95,7 +95,11 @@ _FALLBACK_TESSERACT_PATHS = (
 
 
 class OcrError(Exception):
-    """Raised for user-facing OCR problems (bad render, engine failure)."""
+    """Raised for OCR problems, optionally retaining already recovered pages."""
+
+    def __init__(self, message: str, *, partial: dict[int, str] | None = None):
+        super().__init__(message)
+        self.partial = partial or {}
 
 
 @dataclass
@@ -476,11 +480,23 @@ def ocr_pages(
                     for number in numbers[offset:offset + _OCR_WORKERS]:
                         batch.append((number, _render_page(document, number - 1, dpi=dpi)))
                     futures = [pool.submit(recognize, item) for item in batch]
-                    out.update(f.result() for f in futures)
+                    failures = []
+                    for future in futures:
+                        try:
+                            number, text = future.result()
+                            out[number] = text
+                        except OcrError as exc:
+                            failures.append(str(exc))
+                    if failures:
+                        raise OcrError("; ".join(failures), partial=dict(out))
                 finally:
                     wait(futures)
                     for _, image in batch:
                         image.close()
+    except OcrError as exc:
+        if not exc.partial:
+            exc.partial = dict(out)
+        raise
     finally:
         with PDFIUM_LOCK:
             document.close()

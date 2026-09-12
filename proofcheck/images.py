@@ -29,7 +29,7 @@ def is_image_dir(path: str) -> bool:
     if not os.path.isdir(path):
         return False
     try:
-        return any(os.path.splitext(f)[1].lower() in IMAGE_EXTS for f in os.listdir(path))
+        return any(os.path.splitext(f)[1].lower() in IMAGE_EXTS and os.path.isfile(os.path.join(path, f)) for f in os.listdir(path))
     except OSError:
         return False
 
@@ -66,6 +66,7 @@ def extract(path: str, *, ocr_lang: str = "eng", ocr_psm: int = 6,
         raise PdfError(f"Image folder exceeds {MAX_PAGES} pages.")
     use_cache = use_cache and ocr_cache.enabled()
     all_cached = True
+    total_chars = 0
     for i, image_path in enumerate(files, start=1):
         digest = ocr_cache.file_sha256(image_path) if use_cache else None
         cached = ocr_cache.load(digest, dpi=0, lang=ocr_lang, psm=ocr_psm) if digest else None
@@ -87,7 +88,8 @@ def extract(path: str, *, ocr_lang: str = "eng", ocr_psm: int = 6,
                 text = ""
             if digest is not None and succeeded:
                 ocr_cache.store(digest, dpi=0, lang=ocr_lang, pages={1: text}, psm=ocr_psm)
-        if sum(map(len, result.pages.values())) + len(text) > MAX_TEXT_CHARS:
+        total_chars += len(text)
+        if total_chars > MAX_TEXT_CHARS:
             raise PdfError(f"Document exceeds {MAX_TEXT_CHARS} extracted characters.")
         result.pages[i] = text
         if text.strip():

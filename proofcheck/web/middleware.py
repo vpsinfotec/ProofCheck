@@ -34,7 +34,7 @@ class ResourceLimitsMiddleware:
         if logging_in:
             # Per-process, bounded IP buckets; a reverse proxy should also rate-limit.
             now = monotonic()
-            host = scope.get('client', ('unknown', 0))[0]
+            host = (scope.get('client') or ('unknown', 0))[0]
             with self.lock:
                 for key in list(self.attempts):
                     if not self.attempts[key] or self.attempts[key][-1] < now - 60:

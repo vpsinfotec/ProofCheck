@@ -113,7 +113,7 @@ async def _pipeline_error_handler(_: Request, exc: PipelineError) -> JSONRespons
 @app.exception_handler(Exception)
 async def _unexpected_error_handler(_: Request, exc: Exception) -> JSONResponse:
     logger.error("Unexpected request failure", exc_info=exc)
-    return JSONResponse(status_code=500, content={"error": "The check could not be completed. Please retry or contact the administrator."})
+    return JSONResponse(status_code=500, content={"error": "The check could not be completed. Please retry or contact the administrator."}, headers={"Cache-Control": "no-store"})
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -247,7 +247,7 @@ def _meta_dict(result: RunResult) -> dict:
 
 
 def _record_history(run_id: str, user: str, result: RunResult) -> None:
-    """Store non-PII run metadata. Never lets a storage hiccup fail the actual check."""
+    """Persist metadata and report ownership; fail closed if storage is unavailable."""
     try:
         store.add_run(
             run_id=run_id,
@@ -384,7 +384,7 @@ def check(
         report_html.write(result, str(_REPORT_DIR / f"{run_id}.html"))
         report_xlsx.write(result, str(_REPORT_DIR / f"{run_id}.xlsx"))
 
-        # Persist non-PII run metadata so it survives the short-lived report cache.
+        # Persist run metadata and ownership so it survives the short-lived report cache.
         _record_history(run_id, user, result)
 
         result.timings["reports"] = time.perf_counter() - report_start

@@ -8,6 +8,8 @@ no text layer). Both return the same :class:`~proofcheck.pdf.PdfText`.
 
 from __future__ import annotations
 
+import os
+
 from . import images, pdf
 from .pdf import PdfError, PdfText
 
@@ -29,6 +31,8 @@ def extract(
     if images.is_image_input(path):
         # Images have no text layer, so OCR is implied regardless of the ``ocr`` flag.
         return images.extract(path, ocr_lang=ocr_lang, ocr_psm=ocr_psm, use_cache=use_cache)
+    if os.path.isdir(path):
+        raise PdfError("The directory contains no supported image files.")
     return pdf.extract(path, ocr=ocr, ocr_dpi=ocr_dpi, ocr_lang=ocr_lang, ocr_psm=ocr_psm,
                        use_cache=use_cache)
 

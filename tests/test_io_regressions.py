@@ -129,3 +129,36 @@ def test_cache_namespace_invalidates_text(monkeypatch):
     ocr_cache.store('a'*64,dpi=300,lang='eng',pages={1:'text'})
     monkeypatch.setenv('PROOFCHECK_OCR_CACHE_NAMESPACE','engine-upgrade')
     assert ocr_cache.load('a'*64,dpi=300,lang='eng') is None
+
+
+def test_partial_ocr_failure_keeps_successful_pages(pdf_path, monkeypatch):
+    from proofcheck import pdf
+    monkeypatch.setattr(ocr, 'available', lambda: True)
+    monkeypatch.setattr(ocr, '_render_page', lambda doc, i, **kw: Image.new('L',(10,10),i))
+    def recognize(image, **kw):
+        if image.getpixel((0,0)) == 1:
+            raise ocr.OcrError('page two failed')
+        return 'Alice', 95, 1, 'test', image
+    monkeypatch.setattr(ocr, '_best_ocr', recognize)
+    result=pdf.PdfText(pages={1:'',2:''},empty_pages=[1,2])
+    pdf._apply_ocr(result,pdf_path,dpi=300,lang='eng',psm=6)
+    assert result.pages[1] == 'Alice' and result.empty_pages == [2]
+    assert result.ocr_error and not list(ocr_cache.cache_dir().glob('*.json'))
+
+
+def test_pdf_rejects_excessive_ocr_text(pdf_path,monkeypatch):
+    from proofcheck import pdf
+    monkeypatch.setattr(ocr,'available',lambda:True)
+    monkeypatch.setattr(ocr,'ocr_pages',lambda *a,**kw:{2:'x'*100})
+    monkeypatch.setattr(pdf,'MAX_TEXT_CHARS',50)
+    result=pdf.PdfText(pages={1:'ok',2:''},empty_pages=[2])
+    with pytest.raises(pdf.PdfError,match='after OCR'):
+        pdf._apply_ocr(result,pdf_path,dpi=300,lang='eng',psm=6)
+
+
+def test_directory_with_image_named_subfolder_is_not_an_image(tmp_path):
+    from proofcheck import document
+    (tmp_path/'fake.png').mkdir()
+    assert not images.is_image_dir(str(tmp_path))
+    with pytest.raises(document.PdfError,match='no supported'):
+        document.extract(str(tmp_path))
