@@ -57,7 +57,7 @@ def registration_enabled() -> bool:
 
 
 def _secret() -> bytes:
-    return os.environ.get("PROOFCHECK_SECRET", _FALLBACK_SECRET).encode("utf-8")
+    return (os.environ.get("PROOFCHECK_SECRET") or _FALLBACK_SECRET).encode("utf-8")
 
 
 def _session_seconds() -> int:

@@ -143,3 +143,9 @@ def test_capacity_rejected_before_reading_body():
         assert messages[0]['status'] == 429 and not called
     try: asyncio.run(exercise())
     finally: middleware.slots.release()
+
+
+def test_empty_secret_uses_random_fallback(monkeypatch):
+    monkeypatch.setenv('PROOFCHECK_SECRET','')
+    assert len(auth._secret()) >= 32
+    assert auth.verify_token(auth.make_token('alice')) == 'alice'
