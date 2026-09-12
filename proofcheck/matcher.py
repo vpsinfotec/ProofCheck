@@ -92,7 +92,8 @@ class PreparedMatcher:
             if not hay:
                 continue
             for cand in needles:
-                score = fuzz.partial_ratio(cand, hay, score_cutoff=max(0, best_score))
+                scorer = fuzz.ratio if len(hay) < len(cand) else fuzz.partial_ratio
+                score = scorer(cand, hay, score_cutoff=max(0, best_score))
                 if score > best_score:
                     best_score = score
                     best = (number, raw, hay, cand)

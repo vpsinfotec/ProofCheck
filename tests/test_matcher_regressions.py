@@ -67,3 +67,8 @@ def test_unicode_span_map_matches_authoritative_normalization(options):
         assert actual == normalize(raw, **options)
         assert len(spans) == len(actual)
         assert all(0 <= a <= b <= len(raw) for a, b in spans)
+
+
+def test_short_page_fragment_cannot_count_as_full_value():
+    result = match_value("John Alexander Smith", {1: "John"}, fuzzy_threshold=90)
+    assert result.status is Status.MISSING and result.score < 90

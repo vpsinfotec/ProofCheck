@@ -25,6 +25,7 @@ import time
 from .limits import env_int
 
 CACHE_REVISION = "v2"
+_CACHE_MAX_BYTES = env_int("PROOFCHECK_OCR_CACHE_MAX_MB", 512) * 1024 * 1024
 _CACHE_TTL = env_int("PROOFCHECK_OCR_CACHE_TTL_SECONDS", 86400)
 from pathlib import Path
 
@@ -57,7 +58,8 @@ def file_sha256(path: str, *, chunk: int = 1 << 20) -> str:
 def _entry_path(directory: Path, digest: str, dpi: int, lang: str, psm: int) -> Path:
     # DPI, language, and page-segmentation mode all change OCR output, so all are in the key.
     safe_lang = "".join(c for c in lang if c.isalnum() or c in "+-_") or "eng"
-    return directory / f"{CACHE_REVISION}.{digest}.{dpi}.{safe_lang}.psm{int(psm)}.json"
+    namespace = hashlib.sha256(os.environ.get("PROOFCHECK_OCR_CACHE_NAMESPACE", "default").encode()).hexdigest()[:16]
+    return directory / f"{CACHE_REVISION}.{namespace}.{digest}.{dpi}.{safe_lang}.psm{int(psm)}.json"
 
 
 def load(digest: str, *, dpi: int, lang: str, psm: int = 3) -> dict[int, str] | None:
@@ -91,7 +93,7 @@ def store(digest: str, *, dpi: int, lang: str, pages: dict[int, str], psm: int =
         return
     tmp = None
     try:
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = _entry_path(directory, digest, dpi, lang, psm)
         fd, tmp = tempfile.mkstemp(prefix=".ocr-", suffix=".tmp", dir=directory)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -113,11 +115,25 @@ def cleanup() -> None:
     if directory is None or not directory.exists():
         return
     cutoff = time.time() - _CACHE_TTL
+    entries = []
     try:
         for path in directory.iterdir():
             try:
-                if path.is_file() and path.stat().st_mtime < cutoff:
-                    path.unlink()
+                if path.is_file() and (path.suffix == ".json" or path.name.startswith(".ocr-")):
+                    stat = path.stat()
+                    if stat.st_mtime < cutoff:
+                        path.unlink()
+                    else:
+                        entries.append((stat.st_mtime, stat.st_size, path))
+            except OSError:
+                pass
+        total = sum(size for _, size, _ in entries)
+        for _, size, path in sorted(entries):
+            if total <= _CACHE_MAX_BYTES:
+                break
+            try:
+                path.unlink()
+                total -= size
             except OSError:
                 pass
     except OSError:

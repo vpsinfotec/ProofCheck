@@ -57,7 +57,7 @@ _STATIC_DIR = Path(__file__).parent / "static"
 # Short-lived cache for generated report files, keyed by run_id (download links).
 # NOTE: production should move this to object storage with lifecycle expiry.
 _REPORT_DIR = Path(os.environ.get("PROOFCHECK_REPORT_DIR", str(Path(tempfile.gettempdir()) / "proofcheck_reports")))
-_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+_REPORT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ app = FastAPI(
     title="ProofCheck API",
     lifespan=lifespan,
     version=__version__,
-    description="Deterministic Excel-vs-PDF proof-reading. No AI/LLM/ML. "
+    description="Local Excel-vs-document proof-reading with optional Tesseract OCR. "
     "The JSON contract here is the stable, swappable boundary; the bundled HTML "
     "UI is just one disposable client.",
 )

@@ -36,7 +36,7 @@ def db_path() -> Path:
 @contextmanager
 def _connect():
     path = db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     conn = sqlite3.connect(str(path), timeout=10)
     conn.row_factory = sqlite3.Row
     try:

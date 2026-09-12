@@ -115,3 +115,17 @@ def test_oversized_image_rejected_before_decode(tmp_path, monkeypatch):
     monkeypatch.setattr(ocr, 'MAX_IMAGE_PIXELS', 100)
     with pytest.raises(ocr.OcrError, match='pixels'):
         ocr._load_image_file(str(path))
+
+
+def test_cache_cleanup_enforces_budget(monkeypatch):
+    for i in range(3):
+        ocr_cache.store(str(i)*64, dpi=300, lang='eng', pages={1:'text'*100}, psm=6)
+    monkeypatch.setattr(ocr_cache,'_CACHE_MAX_BYTES',450)
+    ocr_cache.cleanup()
+    assert sum(p.stat().st_size for p in ocr_cache.cache_dir().glob('*.json')) <= 450
+
+
+def test_cache_namespace_invalidates_text(monkeypatch):
+    ocr_cache.store('a'*64,dpi=300,lang='eng',pages={1:'text'})
+    monkeypatch.setenv('PROOFCHECK_OCR_CACHE_NAMESPACE','engine-upgrade')
+    assert ocr_cache.load('a'*64,dpi=300,lang='eng') is None
