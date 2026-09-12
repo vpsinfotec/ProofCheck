@@ -115,3 +115,4 @@ class RunResult:
     summary: Summary
     columns: list[ColumnResult] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    timings: dict[str, float] = field(default_factory=dict)

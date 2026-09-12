@@ -9,9 +9,11 @@ door open for a future background-job runner (arq/RQ) to call it unchanged.
 from __future__ import annotations
 
 import os
+import re
+from time import perf_counter
 
 from . import document, excel, pdf
-from .matcher import match_value
+from .matcher import PreparedMatcher
 from .models import (
     ColumnResult,
     Meta,
@@ -49,6 +51,17 @@ def run(config: RunConfig) -> RunResult:
     if not config.all_columns and not config.columns:
         raise PipelineError("No columns selected. Pass column names or enable all-columns.")
 
+    if not 1 <= config.header_row <= 1_048_576:
+        raise PipelineError("Header row must be between 1 and 1048576.")
+    if not 0 <= config.fuzzy_threshold <= 100:
+        raise PipelineError("Fuzzy threshold must be between 0 and 100.")
+    if not 72 <= config.ocr_dpi <= 600:
+        raise PipelineError("OCR DPI must be between 72 and 600.")
+    if config.ocr_psm not in {3, 4, 6, 7, 8, 11, 12, 13}:
+        raise PipelineError("Unsupported OCR page layout (PSM).")
+    if not re.fullmatch(r"[A-Za-z0-9_]+(?:[+][A-Za-z0-9_]+)*", config.ocr_lang):
+        raise PipelineError("Invalid OCR language; use installed pack names such as eng+ara.")
+    started = perf_counter()
     # 1. Load the requested Excel columns.
     try:
         column_data = excel.load_columns(
@@ -64,6 +77,7 @@ def run(config: RunConfig) -> RunResult:
     if not column_data:
         raise PipelineError("No columns to check were found on the sheet.")
 
+    loaded = perf_counter()
     # 2. Extract page text from the input (PDF text layer, or OCR for image input).
     try:
         pdf_text = document.extract(
@@ -80,21 +94,18 @@ def run(config: RunConfig) -> RunResult:
     # 3. Match every value in every selected column.
     # Pages recovered via OCR, so each match can report whether it came from the embedded
     # text layer or from OCR.
+    extracted = perf_counter()
+    matcher = PreparedMatcher(
+        pdf_text.pages, fuzzy_threshold=config.fuzzy_threshold,
+        normalize_digits=config.normalize_digits, strip_punctuation=config.strip_punctuation,
+        fold_diacritics=config.fold_diacritics, reverse=config.reverse,
+    )
     ocr_page_set = set(pdf_text.ocr_pages)
     columns: list[ColumnResult] = []
     for cd in column_data:
         col_result = ColumnResult(name=cd.name)
         for row_num, value in cd.cells:
-            mr = match_value(
-                value,
-                pdf_text.pages,
-                fuzzy_threshold=config.fuzzy_threshold,
-                normalize_digits=config.normalize_digits,
-                strip_punctuation=config.strip_punctuation,
-                fold_diacritics=config.fold_diacritics,
-                reverse=config.reverse,
-                row=row_num,
-            )
+            mr = matcher.match(value, row=row_num)
             if mr.page is not None:
                 mr.source = "OCR" if mr.page in ocr_page_set else "text"
             col_result.results.append(mr)
@@ -122,4 +133,6 @@ def run(config: RunConfig) -> RunResult:
         summary=summary,
         columns=columns,
         warnings=pdf_text.warnings(),
+        timings={"load_excel": loaded - started, "extract_document": extracted - loaded,
+                 "match": perf_counter() - extracted, "pipeline": perf_counter() - started},
     )

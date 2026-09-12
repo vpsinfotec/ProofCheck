@@ -83,3 +83,51 @@ def normalize(
 def reverse_words(text: str) -> str:
     """Reverse word order, e.g. 'john smith' -> 'smith john'. Used for reverse matching."""
     return " ".join(reversed(text.split()))
+
+
+def normalize_with_spans(text: str, **options) -> tuple[str, list[tuple[int, int]]]:
+    """Normalize and retain original character spans for faithful report snippets.
+
+    Combining sequences and Hangul Jamo are normalized together. Whitespace and
+    compatibility expansions each retain their source span, avoiding proportional
+    offset guesses on pages with ligatures, accents, or repeated whitespace.
+    The rare cross-cluster Unicode composition is reconciled to normalize().
+    """
+    from difflib import SequenceMatcher
+    clusters = []
+    for i, char in enumerate(text):
+        jamo = 0x1100 <= ord(char) <= 0x11FF
+        if clusters and (unicodedata.combining(char) or jamo):
+            start, _, value = clusters[-1]
+            clusters[-1] = (start, i + 1, value + char)
+        else:
+            clusters.append((i, i + 1, char))
+    chars, spans = [], []
+    for start, end, value in clusters:
+        # Wrapping avoids stripping whitespace until all clusters are joined.
+        value = normalize("x" + value + "x", **options)[1:-1]
+        for char in value:
+            if char.isspace():
+                if chars and chars[-1] == " ":
+                    spans[-1] = (spans[-1][0], end)
+                    continue
+                char = " "
+            chars.append(char)
+            spans.append((start, end))
+    if chars and chars[0] == " ":
+        chars.pop(0); spans.pop(0)
+    if chars and chars[-1] == " ":
+        chars.pop(); spans.pop()
+    mapped = "".join(chars)
+    canonical = normalize(text, **options)
+    if mapped != canonical:
+        corrected = []
+        for op, a, b, c, d in SequenceMatcher(None, mapped, canonical, autojunk=False).get_opcodes():
+            if op == "equal":
+                corrected.extend(spans[a:b])
+            elif op != "delete":
+                start = spans[a][0] if a < len(spans) else len(text)
+                end = spans[b - 1][1] if b > a else start
+                corrected.extend([(start, end)] * (d - c))
+        spans = corrected
+    return canonical, spans
