@@ -38,3 +38,16 @@ and continues — ProofCheck still works, just with OCR disabled until the engin
 
 > Tip: set `TESSERACT_CMD=/full/path/to/tesseract` to point ProofCheck at a non-standard
 > install location. On Windows it also auto-discovers `C:\Program Files\Tesseract-OCR`.
+
+
+## 0.3.0 validation and benchmarks
+
+The application does not need Node at runtime. Frontend developer checks use `npm ci`
+and `npm run test:ui` from the repository root. For live browser testing, install
+Playwright Chromium and run `npm run test:browser`; set `PROOFCHECK_TEST_PYTHON` or
+`CHROMIUM_PATH` only when using non-default installed runtimes.
+
+`python scripts/benchmarks/processing.py` compares the committed supplied baseline
+against the current pipeline and saves JSON measurements. See `docs/PERFORMANCE.md`.
+The setup scripts were retained; platform package-manager installation was not rerun
+on Windows/macOS in this audit. Use `docs/CONFIGURATION.md` for current limits/defaults.

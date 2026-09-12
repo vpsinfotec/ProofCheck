@@ -1,0 +1,96 @@
+{
+  "baseline_commit": "9c9502c",
+  "python": "3.12.14",
+  "repeats": 3,
+  "dependencies": {
+    "rapidfuzz": "3.14.5",
+    "pdfplumber": "0.11.10",
+    "pypdfium2": "5.13.0",
+    "fastapi": "0.138.0",
+    "starlette": "1.6.0"
+  },
+  "workloads": [
+    {
+      "name": "exact_unique",
+      "values": 300,
+      "pages": 20,
+      "baseline_seconds": 0.23494542900061788,
+      "updated_seconds": 0.003585358000236738,
+      "speedup": 65.52914073994972,
+      "baseline_samples": [
+        0.23355620199981786,
+        0.23494542900061788,
+        0.24254953500076226
+      ],
+      "updated_samples": [
+        0.003585358000236738,
+        0.003980690000389586,
+        0.0034206170003017178
+      ],
+      "verdict_parity": true
+    },
+    {
+      "name": "exact_repeated",
+      "values": 600,
+      "pages": 20,
+      "baseline_seconds": 0.5019451539992588,
+      "updated_seconds": 0.0018432070000926615,
+      "speedup": 272.32164047446923,
+      "baseline_samples": [
+        0.49354813099944295,
+        0.5019451539992588,
+        0.515370883000287
+      ],
+      "updated_samples": [
+        0.0017410939999535913,
+        0.002348931999222259,
+        0.0018432070000926615
+      ],
+      "verdict_parity": true
+    },
+    {
+      "name": "fuzzy_and_missing",
+      "values": 80,
+      "pages": 20,
+      "baseline_seconds": 0.07488510100029089,
+      "updated_seconds": 0.019291366999823367,
+      "speedup": 3.8817933949925134,
+      "baseline_samples": [
+        0.07488510100029089,
+        0.08010504100002436,
+        0.07131603900052141
+      ],
+      "updated_samples": [
+        0.02030444299998635,
+        0.019291366999823367,
+        0.018129844999748457
+      ],
+      "verdict_parity": true
+    },
+    {
+      "name": "pipeline_text_pdf",
+      "values": 600,
+      "pages": 20,
+      "baseline_seconds": 1.0163454960002127,
+      "updated_seconds": 0.03478639800050587,
+      "speedup": 29.21675006378737,
+      "baseline_samples": [
+        1.0163454960002127,
+        1.1355143990003853,
+        0.9916677499995785
+      ],
+      "updated_samples": [
+        0.03478639800050587,
+        0.030779302999690117,
+        0.0871758260000206
+      ],
+      "verdict_parity": true,
+      "updated_stage_seconds": {
+        "load_excel": 0.06386403800024709,
+        "extract_document": 0.010534082999583916,
+        "match": 0.012691149000602309,
+        "pipeline": 0.08708943200053909
+      }
+    }
+  ]
+}
