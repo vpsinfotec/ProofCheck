@@ -24,13 +24,10 @@ safe to re-run.
 
 ## What gets installed
 
-- **Tesseract OCR engine** via the platform package manager (the scripts try each in
-  order and stop at the first one present):
-  - Linux: `apt-get` / `dnf` / `yum` / `pacman` / `zypper` / `apk` / `xbps-install` (Void) /
-    `eopkg` (Solus) / `nix-env`
-  - macOS: Homebrew (`brew`) → MacPorts (`port`)
-  - Windows: `winget` (UB-Mannheim build) → `choco` → `scoop` → direct UB-Mannheim installer
-    download (silent) as a last resort
+- **Tesseract OCR engine** via the platform package manager:
+  - Linux: `apt-get` / `dnf` / `yum` / `pacman` / `zypper` / `apk`
+  - macOS: Homebrew (`brew`)
+  - Windows: `winget` (UB-Mannheim build) → `choco` → `scoop` fallback
 - **Python deps**: `pip install -e ".[dev,ocr]"` (core + tests + OCR helpers
   `pytesseract` / `Pillow` / `pypdfium2`).
 

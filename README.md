@@ -27,19 +27,8 @@ A complete tour of what ProofCheck does and why.
 - **Character-level diffs.** For every fuzzy/missing value you get a `[op, text]` diff
   (`equal`/`insert`/`delete`) showing exactly how the expected value differs from what was
   found, rendered as `<del>`/`<ins>` highlighting in the UI and reports.
-- **Duplicated-word detection.** A value that appears in the PDF but is immediately followed
-  by a repeat of its last word — a **duplicated surname**, e.g. the PDF showing `JORDAN AVERY
-  AVERY` for a spreadsheet value of `JORDAN AVERY` — is reported as **`FUZZY` / "Found with
-  differences"** with the extra word highlighted, rather than a clean `EXACT`. A plain
-  substring match would otherwise accept it silently, because the clean name is still a
-  perfect substring of the duplicated text. The check is deterministic and token-based.
 - **Pass rate** = `(exact + fuzzy) / (total − skipped)`; blank cells are excluded.
 - **Per-page location.** Each match reports the PDF page it was found on.
-- **Fast text extraction.** Text is read with **PDFium** (Chrome's PDF engine, via
-  `pypdfium2`), which stays fast even on large, image-heavy scanned PDFs where pdfminer-based
-  extraction crawls every embedded image — a 156 MB / 150-page file drops from ~19 minutes to
-  ~20 seconds. `pdfplumber` remains an automatic fallback; force it with
-  `PROOFCHECK_PDF_ENGINE=pdfplumber`. Both read the same text layer, so results are identical.
 
 ### Text normalization (toggle per run)
 All normalization is deterministic and applied to both sides before comparison:
@@ -75,10 +64,6 @@ All normalization is deterministic and applied to both sides before comparison:
   (no OCR). Each page tries a few deterministic strategies but **early-exits** as soon as it
   gets a confident read, so clean pages cost a single Tesseract pass. For big multi-page PDFs,
   a lower `--ocr-dpi` is the most effective speed knob.
-- **Parallelism.** `--workers/-j` (default `0` = auto from CPU count, capped at 8; `1` = sequential) fans the
-  independent per-page OCR and per-value matching out over a thread pool. It only changes *how
-  fast* a run finishes, never the result: work is reassembled in input order and every unit is a
-  pure function of its input, so output is byte-for-byte identical to `-j 1`.
 - **Diagnose it:** `proofcheck ocr file.pdf` shows the recovered text, **mean confidence**,
   and the winning **strategy** per page; `--save-images DIR` dumps exactly what Tesseract saw.
 - **Limits.** Tesseract is trained on ordinary document fonts. Heavily stylized **display /
@@ -120,10 +105,6 @@ All normalization is deterministic and applied to both sides before comparison:
 - Drag-free workflow: pick the Excel → it auto-loads sheets/columns into a picker → pick the
   PDF → tune flags/threshold → run. Results are filterable by status and searchable, with
   inline diff highlighting and one-click report downloads.
-- **Live progress bar.** The check streams progress over Server-Sent Events (`/api/check/stream`),
-  so instead of a spinner that could look hung, a labelled bar shows the extraction and matching
-  stages advancing and finishing — useful on large/scanned PDFs. It reuses the same pipeline
-  progress the CLI bar does; `/api/check` remains for a plain one-shot JSON response.
 - Re-uploading an **edited file** re-reads it automatically (no page refresh needed), and your
   column selection is preserved across re-inspects.
 - **Dark / light mode** toggle in the header (remembers your choice; follows the OS preference
@@ -155,7 +136,7 @@ All normalization is deterministic and applied to both sides before comparison:
   JSON contract (`web/schemas.py`).
 - **Cross-OS setup scripts** (`scripts/setup.sh` / `setup.ps1`) install the Tesseract engine,
   create a virtualenv, install the package, and run the tests in one command.
-- **Deterministic test suite** (65 tests) with fixtures generated on the fly — no committed
+- **Deterministic test suite** (60 tests) with fixtures generated on the fly — no committed
   binaries. OCR tests pass with or without the engine installed.
 
 ---
@@ -187,53 +168,6 @@ pip install -e ".[ocr]"     # + OCR helpers (also needs the Tesseract *binary*, 
 
 This installs the `proofcheck` console script.
 
-### Global install (use `proofcheck` anywhere, no virtualenv to activate)
-
-If you just want the `proofcheck` command available system-wide — no `source .venv/...`
-step before every run — install it into your global Python instead of a project venv.
-
-**Editable global install (recommended for a working clone).** Run this from the repo root
-with the interpreter you want it attached to:
-
-```bash
-# 'python' here is your GLOBAL interpreter, NOT an activated venv
-python -m pip install -e .            # core only
-python -m pip install -e ".[ocr]"     # + OCR helpers (still needs the Tesseract binary)
-```
-
-`-e` (editable) links the install straight to this source tree, so `git pull`s take effect
-without reinstalling. It then shows up in the global list and runs from any directory:
-
-    $ python -m pip show proofcheck
-    $ proofcheck --help          # works from anywhere now
-
-Cross-platform alternative (works in PowerShell/cmd too):
-
-```console
-$ python -m pip show proofcheck
-Name: proofcheck
-Location: ...
-```
-
-Remove it with `python -m pip uninstall proofcheck`. Drop the `-e` for a plain (copied)
-install if you don't want a live link to the source.
-
-**Alternatives:**
-
-- **[`pipx`](https://pipx.pypa.io/)** — isolates the CLI in its own hidden venv so its
-  dependencies never clash with your other global packages (cleanest if you only want the
-  command, not an importable library):
-  ```bash
-  pipx install .                 # or ".[ocr]", or git+https://github.com/curiousbud/ProofCheck.git
-  ```
-- **User install** — same as the editable install but into your per-user site-packages
-  (no admin needed on locked-down machines): `python -m pip install --user .`
-
-> On Windows, if the shell can't find `proofcheck` afterwards, your Python `Scripts`
-> directory isn't on `PATH` — add `%APPDATA%\Python\Python3xx\Scripts` (`--user`) or run
-> `python -m pipx ensurepath` (pipx), then reopen the terminal. The Tesseract **engine
-> binary** is still a separate system install (see below) if you need `--ocr`.
-
 #### Installing the Tesseract engine (only needed for `--ocr`)
 
 `pip install ".[ocr]"` adds the Python helpers; the **engine binary** is a separate
@@ -244,16 +178,8 @@ system install:
 | Debian/Ubuntu | `sudo apt-get install -y tesseract-ocr` |
 | Fedora | `sudo dnf install -y tesseract` |
 | Arch | `sudo pacman -S tesseract` |
-| openSUSE | `sudo zypper install -y tesseract-ocr` |
-| Alpine | `sudo apk add tesseract-ocr` |
-| Void | `sudo xbps-install -Sy tesseract-ocr` |
-| Solus | `sudo eopkg install -y tesseract` |
-| Nix | `nix-env -iA nixpkgs.tesseract` |
-| macOS | `brew install tesseract` (or `sudo port install tesseract`) |
-| Windows | `winget install UB-Mannheim.TesseractOCR` (or `choco`/`scoop`) |
-
-The `scripts/setup.*` helpers try these automatically, in order, and fall back to a direct
-UB-Mannheim installer download on Windows if no package manager is present.
+| macOS | `brew install tesseract` |
+| Windows | `winget install UB-Mannheim.TesseractOCR` |
 
 ProofCheck auto-discovers the engine on PATH and at the standard Windows location
 (`C:\Program Files\Tesseract-OCR`). Override with `TESSERACT_CMD=/path/to/tesseract`.
@@ -310,14 +236,6 @@ Tune accuracy with `--ocr-dpi` (raise for small text) and `--ocr-psm` (page layo
 **OCR flags:** `--ocr` (OCR pages with no text layer), `--ocr-lang` (Tesseract language(s),
 e.g. `eng+ara`), `--ocr-dpi` (render DPI, default 300), `--ocr-psm` (page layout),
 `--no-ocr-cache` (force fresh OCR, ignore the cache for this run).
-
-**Performance flags:** `--workers/-j N` (parallel workers for OCR and matching; `0` = auto
-from CPU count, capped at 8; `1` = sequential). Output is identical regardless of the worker count.
-**Progress:** `check` shows a live progress bar on stderr for the extraction (text-layer +
-OCR) and matching stages, each ending in a definite `done` marker, so long runs report how
-far along they are instead of looking hung. It is on automatically for an interactive
-terminal and suppressed when stderr is piped/redirected; force it either way with
-`--progress` / `--no-progress`.
 
 ### Status meanings & colors
 
@@ -474,7 +392,7 @@ proofcheck/
   models.py        # RunConfig / RunResult / ColumnResult / MatchResult (internal contract)
   normalize.py     # deterministic text normalization (casefold, digits, punct, diacritics)
   excel.py         # workbook load + inspect (openpyxl)
-  pdf.py           # per-page text extraction (PDFium, pdfplumber fallback) + optional OCR fallback
+  pdf.py           # per-page text extraction (pdfplumber) + optional OCR fallback
   images.py        # image / image-folder input (each image = one OCR'd page)
   document.py      # input dispatcher: routes PDFs vs images to the right extractor
   ocr.py           # OPTIONAL deterministic Tesseract OCR (graceful no-op if absent)
@@ -499,7 +417,7 @@ Full per-file deep-dives live in [`proofcheckdocumentation/`](proofcheckdocument
 
 ```bash
 pip install -e ".[dev]"
-pytest          # 65 tests
+pytest          # 60 tests
 ```
 
 OCR tests cover both the real graceful-degradation path and a monkeypatched recovery path,

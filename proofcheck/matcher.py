@@ -42,33 +42,6 @@ def build_diff(expected: str, best_match: str) -> list[DiffOp]:
     return diff
 
 
-def _adjacent_duplicate(cand: str, hay: str) -> str | None:
-    """Detect a duplicated trailing word (e.g. a repeated surname) at a match site.
-
-    ``cand`` is a normalized needle that occurs verbatim in ``hay``. If the run of
-    words matching ``cand`` is *immediately followed* by one or more repeats of its
-    last word, return the normalized ``cand + repeated word(s)`` text (e.g.
-    ``"jordan avery avery"``); otherwise return ``None``.
-
-    This is what makes a duplicated surname visible: a plain substring test treats
-    ``"jordan avery"`` as found inside ``"jordan avery avery"`` and reports EXACT,
-    hiding the extra word. Token-based and deterministic — no scoring, no heuristics.
-    """
-    n = cand.split()
-    h = hay.split()
-    if not n:
-        return None
-    span = len(n)
-    for i in range(len(h) - span + 1):
-        if h[i:i + span] == n:
-            j = i + span
-            while j < len(h) and h[j] == n[-1]:
-                j += 1
-            if j > i + span:
-                return " ".join(h[i:j])
-    return None
-
-
 def _best_snippet(needle_norm: str, haystack_raw: str, haystack_norm: str) -> str:
     """Return the slice of the raw page text aligned to the best fuzzy match.
 
@@ -88,32 +61,6 @@ def _best_snippet(needle_norm: str, haystack_raw: str, haystack_norm: str) -> st
     return haystack_raw[start:end].strip() or haystack_norm[align.dest_start:align.dest_end]
 
 
-def normalize_pages(
-    pages: dict[int, str],
-    *,
-    normalize_digits: bool = False,
-    strip_punctuation: bool = False,
-    fold_diacritics: bool = False,
-) -> dict[int, str]:
-    """Pre-normalize every page's text once, for reuse across many :func:`match_value` calls.
-
-    Page normalization depends only on the run-wide flags, not on the expected value, so
-    it is identical for every value checked in a run. Computing it once here and passing
-    the result into ``match_value(..., pages_norm=...)`` avoids re-normalizing the full text
-    of every page for every single value — the difference between a run finishing in
-    seconds and one that appears to hang on a large spreadsheet + multi-page PDF.
-    """
-    return {
-        page_num: normalize(
-            raw,
-            normalize_digits=normalize_digits,
-            strip_punctuation=strip_punctuation,
-            fold_diacritics=fold_diacritics,
-        )
-        for page_num, raw in pages.items()
-    }
-
-
 def match_value(
     expected: object,
     pages: dict[int, str],
@@ -124,15 +71,8 @@ def match_value(
     fold_diacritics: bool = False,
     reverse: bool = False,
     row: int = 0,
-    pages_norm: dict[int, str] | None = None,
 ) -> MatchResult:
-    """Match a single expected value against all PDF pages.
-
-    ``pages_norm`` is an optional map of ``{page_num: normalized_text}`` produced by
-    :func:`normalize_pages` with the same flags. When supplied it is reused verbatim so the
-    expensive page normalization runs once per run instead of once per value; when omitted
-    (e.g. a standalone/test call) each page is normalized inline as before.
-    """
+    """Match a single expected value against all PDF pages."""
     if _is_blank(expected):
         return MatchResult(row=row, expected="" if expected is None else str(expected),
                             status=Status.SKIPPED)
@@ -156,47 +96,26 @@ def match_value(
     best_score = -1.0
     best_snippet = ""
     exact_page: int | None = None
-    dup_page: int | None = None
-    dup_snippet = ""  # raw PDF text of the name INCLUDING the duplicated word
 
     for page_num, raw in pages.items():
-        hay = pages_norm[page_num] if pages_norm is not None else normalize(raw, **norm_kwargs)
+        hay = normalize(raw, **norm_kwargs)
         if not hay:
             continue
         for cand in needles:
             if cand and cand in hay:
-                dup = _adjacent_duplicate(cand, hay)
-                if dup is None:
-                    # Clean exact substring hit — record the earliest page.
-                    if exact_page is None or page_num < exact_page:
-                        exact_page = page_num
-                elif dup_page is None or page_num < dup_page:
-                    # Found, but the PDF repeats a trailing word (e.g. a duplicated
-                    # surname). Keep the raw snippet so the report shows the extra text.
-                    dup_page = page_num
-                    dup_snippet = _best_snippet(dup, raw, hay)
+                # Exact substring hit — record the earliest page and stop refining.
+                if exact_page is None or page_num < exact_page:
+                    exact_page = page_num
             score = fuzz.partial_ratio(cand, hay)
             if score > best_score:
                 best_score = score
                 best_page = page_num
                 best_snippet = _best_snippet(cand, raw, hay)
 
-    # A clean match anywhere wins: the value genuinely appears verbatim.
     if exact_page is not None:
         return MatchResult(
             row=row, expected=expected_str, status=Status.EXACT,
             page=exact_page, best_match=expected_str, score=100, diff=[],
-        )
-
-    # Otherwise, if the only match had a duplicated trailing word, surface it as a
-    # difference ("Found with differences") with a diff that highlights the extra word.
-    if dup_page is not None:
-        dup_norm = normalize(dup_snippet, **norm_kwargs)
-        return MatchResult(
-            row=row, expected=expected_str, status=Status.FUZZY,
-            page=dup_page, best_match=dup_snippet or None,
-            score=int(round(fuzz.ratio(needle, dup_norm))),
-            diff=build_diff(needle, dup_norm),
         )
 
     score_int = int(round(best_score)) if best_score >= 0 else 0
