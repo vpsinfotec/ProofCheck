@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proofcheck"
-version = "0.2.0"
-description = "Deterministic Excel-vs-PDF proof-reading (no AI/LLM/ML, offline)."
+version = "0.3.0"
+description = "Local Excel-vs-document matching with optional Tesseract OCR."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "See LICENSE.md for proprietary terms" }
@@ -15,9 +15,13 @@ license = { text = "See LICENSE.md for proprietary terms" }
 dependencies = [
     "click==8.4.1",
     "openpyxl==3.1.5",
+    "defusedxml==0.7.1",
     "pdfplumber==0.11.10",
     "rapidfuzz==3.14.5",
     "fastapi==0.138.0",
+    "starlette==1.6.0",
+    "anyio==4.15.1",
+    "pypdfium2==5.13.0",
     "uvicorn[standard]==0.49.0",
     "python-multipart==0.0.32",
     "pydantic==2.13.4",
@@ -25,8 +29,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # Optional, deterministic OCR fallback for no-text-layer (scanned) PDF pages.
-# Tesseract is a fixed, offline glyph recogniser (NOT a learned/generative model), so
-# this preserves the no-AI / same-input-same-output guarantee. The Tesseract *engine*
+# Tesseract runs locally and uses trained recognition models, without any cloud LLM.
+# Reproducibility requires the same engine and language data. The Tesseract *engine*
 # binary must also be installed separately via your OS package manager.
 ocr = [
     "pytesseract==0.3.13",
@@ -46,7 +50,7 @@ dev = [
 proofcheck = "proofcheck.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["proofcheck*"]
+include = ["proofcheck", "proofcheck.*"]
 
 [tool.setuptools.package-data]
 "proofcheck.web" = ["static/*"]

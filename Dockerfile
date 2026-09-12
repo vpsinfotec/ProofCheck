@@ -17,13 +17,15 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     # Persist auth/history + the OCR cache under /data (mount a volume there).
     PROOFCHECK_DB=/data/proofcheck.db \
-    PROOFCHECK_OCR_CACHE=/data/ocr_cache
+    PROOFCHECK_OCR_CACHE=/data/ocr_cache \
+    PROOFCHECK_REPORT_DIR=/data/reports \
+    OMP_THREAD_LIMIT=1
 
 WORKDIR /app
 
 # Copy only what's needed to build/install the package (keeps the image small; the rest is
 # excluded by .dockerignore).
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md LICENSE.md ./
 COPY proofcheck ./proofcheck
 
 # Install the app with the OCR extra (pytesseract / Pillow / pypdfium2). The Tesseract

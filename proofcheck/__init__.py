@@ -1,6 +1,6 @@
-"""ProofCheck — deterministic Excel-vs-PDF proof-reading.
+"""ProofCheck — deterministic Excel-vs-document matching with optional local OCR.
 
-100% deterministic. No AI / LLM / ML anywhere, offline, no network at runtime.
+No cloud calls at runtime. Tesseract uses trained recognition models.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
