@@ -77,6 +77,8 @@ def run(config: RunConfig) -> RunResult:
     if not column_data:
         raise PipelineError("No columns to check were found on the sheet.")
 
+    if not any(cd.cells for cd in column_data):
+        raise PipelineError("The selected sheet has no data rows below the header.")
     loaded = perf_counter()
     # 2. Extract page text from the input (PDF text layer, or OCR for image input).
     try:
@@ -124,7 +126,7 @@ def run(config: RunConfig) -> RunResult:
             "fold_diacritics": config.fold_diacritics,
             "reverse": config.reverse,
             "all_columns": config.all_columns,
-            "ocr": config.ocr,
+            "ocr": config.ocr or document.is_image_input(config.pdf_path),
             "ocr_cache": config.ocr_cache,
         },
     )

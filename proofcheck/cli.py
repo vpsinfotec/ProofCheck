@@ -32,18 +32,21 @@ def cli() -> None:
 @cli.command()
 @click.argument("excel_path", type=click.Path(exists=True, dir_okay=False))
 @click.option("--sheet", default=None, help="Sheet name (default: active sheet).")
-@click.option("--header-row", default=1, show_default=True, help="1-based header row.")
+@click.option("--header-row", default=1, type=click.IntRange(1, 1048576), show_default=True, help="1-based header row.")
 def inspect(excel_path: str, sheet: str | None, header_row: int) -> None:
     """List sheets and column headers of an Excel file."""
     try:
         names = excel.sheet_names(excel_path)
-        headers = excel.inspect(excel_path)
+        headers = excel.inspect(excel_path, header_row=header_row)
+        if sheet is not None and sheet not in headers:
+            raise excel.ExcelError(f"Sheet {sheet!r} not found.")
     except excel.ExcelError as exc:
         _fail(str(exc))
     click.echo(f"Sheets: {', '.join(names)}")
     for name, cols in headers.items():
-        marker = " (active)" if sheet is None else ""
-        click.echo(f"  [{name}]{marker}: {', '.join(c for c in cols if c)}")
+        if sheet is not None and name != sheet:
+            continue
+        click.echo(f"  [{name}]: {', '.join(c for c in cols if c)}")
 
 
 @cli.command()
@@ -53,7 +56,7 @@ def inspect(excel_path: str, sheet: str | None, header_row: int) -> None:
 @click.option("--column", "-c", "columns", multiple=True, help="Column header to check (repeatable).")
 @click.option("--all-columns", is_flag=True, help="Check every column on the sheet.")
 @click.option("--sheet", default=None, help="Sheet name (default: active sheet).")
-@click.option("--header-row", default=1, show_default=True, help="1-based header row.")
+@click.option("--header-row", default=1, type=click.IntRange(1, 1048576), show_default=True, help="1-based header row.")
 @click.option("--fuzzy-threshold", default=90, show_default=True, type=click.IntRange(0, 100))
 @click.option("--normalize-digits", is_flag=True, help="Fold unicode digits to ASCII.")
 @click.option("--strip-punctuation", is_flag=True, help="Ignore punctuation when matching.")
@@ -61,7 +64,7 @@ def inspect(excel_path: str, sheet: str | None, header_row: int) -> None:
               help="Fold accents/diacritics so accented names match their unaccented form.")
 @click.option("--reverse", is_flag=True, help="Also try reversed word order (e.g. 'Last First').")
 @click.option("--ocr", is_flag=True, help="OCR pages with no text layer (needs the optional OCR extra).")
-@click.option("--ocr-dpi", default=300, show_default=True, type=click.IntRange(72, 1200),
+@click.option("--ocr-dpi", default=300, show_default=True, type=click.IntRange(72, 600),
               help="Render DPI used for OCR.")
 @click.option("--ocr-lang", default="eng", show_default=True, help="Tesseract language(s), e.g. 'eng+ara'.")
 @click.option("--ocr-psm", default=6, show_default=True, type=click.IntRange(0, 13),
@@ -90,6 +93,10 @@ def check(
     xlsx_out: str | None,
 ) -> None:
     """Check EXCEL_PATH values against PDF_PATH and print a summary."""
+    inputs = {os.path.realpath(excel_path), os.path.realpath(pdf_path)}
+    outputs = [os.path.realpath(p) for p in (html_out, xlsx_out) if p]
+    if inputs.intersection(outputs) or len(set(outputs)) != len(outputs):
+        _fail("Reports need separate output paths; do not overwrite input files or each other.")
     config = RunConfig(
         excel_path=excel_path,
         pdf_path=pdf_path,
@@ -122,11 +129,17 @@ def check(
 
     if html_out:
         from . import report_html
-        report_html.write(result, html_out)
+        try:
+            report_html.write(result, html_out)
+        except (OSError, ValueError) as exc:
+            _fail(f"Could not write HTML report: {exc}")
         click.echo(f"HTML report: {html_out}")
     if xlsx_out:
         from . import report_xlsx
-        report_xlsx.write(result, xlsx_out)
+        try:
+            report_xlsx.write(result, xlsx_out)
+        except (OSError, ValueError) as exc:
+            _fail(f"Could not write Excel report: {exc}")
         click.echo(f"xlsx report: {xlsx_out}")
 
     # Non-zero exit when anything is missing, so CI/scripts can gate on it.
@@ -144,7 +157,7 @@ def _parse_pages(spec: str, page_count: int) -> list[int]:
         if "-" in part:
             lo, _, hi = part.partition("-")
             try:
-                for p in range(int(lo), int(hi) + 1):
+                for p in range(max(1, int(lo)), min(page_count, int(hi)) + 1):
                     pages.add(p)
             except ValueError:
                 continue
@@ -159,7 +172,7 @@ def _parse_pages(spec: str, page_count: int) -> list[int]:
               help="Pages/images to OCR, e.g. '1,3,5-7'. Default: pages with no text layer (all, for images).")
 @click.option("--all-pages", is_flag=True, help="OCR every page, even those with a text layer.")
 @click.option("--ocr-lang", default="eng", show_default=True, help="Tesseract language(s), e.g. 'eng+ara'.")
-@click.option("--ocr-dpi", default=300, show_default=True, type=click.IntRange(72, 1200))
+@click.option("--ocr-dpi", default=300, show_default=True, type=click.IntRange(72, 600))
 @click.option("--ocr-psm", default=6, show_default=True, type=click.IntRange(0, 13),
               help="Page-segmentation mode (6=block, 3=auto, 4=columns, 11=sparse).")
 @click.option("--save-images", type=click.Path(file_okay=False),
