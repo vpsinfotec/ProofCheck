@@ -20,6 +20,12 @@ import hashlib
 import json
 import os
 import tempfile
+import time
+
+from .limits import env_int
+
+CACHE_REVISION = "v2"
+_CACHE_TTL = env_int("PROOFCHECK_OCR_CACHE_TTL_SECONDS", 86400)
 from pathlib import Path
 
 _DISABLED_VALUES = {"", "0", "off", "false", "no"}
@@ -51,7 +57,7 @@ def file_sha256(path: str, *, chunk: int = 1 << 20) -> str:
 def _entry_path(directory: Path, digest: str, dpi: int, lang: str, psm: int) -> Path:
     # DPI, language, and page-segmentation mode all change OCR output, so all are in the key.
     safe_lang = "".join(c for c in lang if c.isalnum() or c in "+-_") or "eng"
-    return directory / f"{digest}.{dpi}.{safe_lang}.psm{int(psm)}.json"
+    return directory / f"{CACHE_REVISION}.{digest}.{dpi}.{safe_lang}.psm{int(psm)}.json"
 
 
 def load(digest: str, *, dpi: int, lang: str, psm: int = 3) -> dict[int, str] | None:
@@ -60,12 +66,22 @@ def load(digest: str, *, dpi: int, lang: str, psm: int = 3) -> dict[int, str] | 
     if directory is None:
         return None
     try:
-        with open(_entry_path(directory, digest, dpi, lang, psm), encoding="utf-8") as fh:
+        path = _entry_path(directory, digest, dpi, lang, psm)
+        if time.time() - path.stat().st_mtime > _CACHE_TTL:
+            path.unlink(missing_ok=True)
+            return None
+        with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)
     except (OSError, ValueError):
         return None
-    # JSON object keys are strings; restore int page numbers.
-    return {int(k): v for k, v in raw.items()}
+    if not isinstance(raw, dict):
+        return None
+    try:
+        if any(not isinstance(v, str) or int(k) < 1 for k, v in raw.items()):
+            return None
+        return {int(k): v for k, v in raw.items()}
+    except (ValueError, TypeError):
+        return None
 
 
 def store(digest: str, *, dpi: int, lang: str, pages: dict[int, str], psm: int = 3) -> None:
@@ -73,12 +89,36 @@ def store(digest: str, *, dpi: int, lang: str, pages: dict[int, str], psm: int =
     directory = cache_dir()
     if directory is None:
         return
+    tmp = None
     try:
         directory.mkdir(parents=True, exist_ok=True)
         path = _entry_path(directory, digest, dpi, lang, psm)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
+        fd, tmp = tempfile.mkstemp(prefix=".ocr-", suffix=".tmp", dir=directory)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({str(k): v for k, v in pages.items()}, fh)
         os.replace(tmp, path)  # atomic publish so readers never see a half-written file
+    except OSError:
+        pass
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def cleanup() -> None:
+    """Expire cached text, including older cache revisions and interrupted writes."""
+    directory = cache_dir()
+    if directory is None or not directory.exists():
+        return
+    cutoff = time.time() - _CACHE_TTL
+    try:
+        for path in directory.iterdir():
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                pass
     except OSError:
         pass

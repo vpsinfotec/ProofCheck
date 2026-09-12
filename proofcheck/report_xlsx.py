@@ -8,6 +8,8 @@ the HTML report and web UI.
 
 from __future__ import annotations
 
+import re
+
 from openpyxl import Workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -31,6 +33,10 @@ def _clean(value):
 def _append(ws, values) -> None:
     """``ws.append`` with every string cell sanitized against illegal control chars."""
     ws.append([_clean(v) for v in values])
+    # Untrusted spreadsheet/PDF text must never become executable Excel formulas.
+    for cell in ws[ws.max_row]:
+        if isinstance(cell.value, str):
+            cell.data_type = "s"
 
 # Solid fills matching the shared status palette.
 _FILLS = {
@@ -93,7 +99,12 @@ def build(result: RunResult) -> Workbook:
 
     for col in result.columns:
         # Sheet titles are capped at 31 chars and can't contain certain characters.
-        title = col.name[:31] or "Column"
+        base = re.sub(r"[\\/*?:\[\]]", "_", _clean(col.name)).strip("'")[:31] or "Column"
+        title, number = base, 1
+        while title.casefold() in {name.casefold() for name in wb.sheetnames}:
+            suffix = f" ({number})"
+            title = base[:31 - len(suffix)] + suffix
+            number += 1
         ws = wb.create_sheet(title=title)
         ws.append(["Row", "Value in your spreadsheet", "Result", "Matched via", "Details"])
         for cell in ws[1]:
@@ -111,6 +122,8 @@ def build(result: RunResult) -> Workbook:
             result_cell.fill = _FILLS[r.status]
             result_cell.font = _WHITE
             ws.cell(row=row_idx, column=5).alignment = _WRAP
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
         _autosize(ws)
 
     return wb

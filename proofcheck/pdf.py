@@ -14,7 +14,57 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import os
+from contextlib import closing
 import pdfplumber
+
+from .limits import MAX_PAGES, MAX_TEXT_CHARS
+from .pdfium_support import PDFIUM_LOCK
+
+try:
+    import pypdfium2 as _pdfium
+except ImportError:
+    _pdfium = None
+
+
+def _resolve_engine() -> str:
+    engine = os.environ.get("PROOFCHECK_PDF_ENGINE", "auto").lower()
+    if engine not in {"auto", "pdfium", "pdfplumber"}:
+        raise PdfError("PROOFCHECK_PDF_ENGINE must be auto, pdfium, or pdfplumber.")
+    if engine == "pdfium" and _pdfium is None:
+        raise PdfError("pypdfium2 is not installed.")
+    return ("pdfium" if _pdfium is not None else "pdfplumber") if engine == "auto" else engine
+
+
+def _read_pages(path: str) -> dict[int, str]:
+    pages = {}
+    total = 0
+    def add(number, text):
+        nonlocal total
+        total += len(text)
+        if total > MAX_TEXT_CHARS:
+            raise PdfError(f"Document exceeds {MAX_TEXT_CHARS} extracted characters.")
+        pages[number] = text
+    if _resolve_engine() == "pdfium":
+        with PDFIUM_LOCK, _pdfium.PdfDocument(path) as doc:
+            if not 1 <= len(doc) <= MAX_PAGES:
+                raise PdfError(f"PDF must contain between 1 and {MAX_PAGES} pages.")
+            for i in range(len(doc)):
+                with closing(doc[i]) as page, closing(page.get_textpage()) as textpage:
+                    if textpage.count_chars() + total > MAX_TEXT_CHARS:
+                        raise PdfError(f"Document exceeds {MAX_TEXT_CHARS} extracted characters.")
+                    add(i + 1, textpage.get_text_bounded() or "")
+    else:
+        with pdfplumber.open(path) as doc:
+            if not 1 <= len(doc.pages) <= MAX_PAGES:
+                raise PdfError(f"PDF must contain between 1 and {MAX_PAGES} pages.")
+            for i, page in enumerate(doc.pages, 1):
+                try:
+                    add(i, page.extract_text() or "")
+                finally:
+                    page.close()
+    return pages
+
 
 
 class PdfError(Exception):
@@ -81,12 +131,8 @@ def extract(
     """
     result = PdfText()
     try:
-        with pdfplumber.open(path) as pdf:
-            for i, page in enumerate(pdf.pages, start=1):
-                text = page.extract_text() or ""
-                result.pages[i] = text
-                if not text.strip():
-                    result.empty_pages.append(i)
+        result.pages = _read_pages(path)
+        result.empty_pages = [n for n, text in result.pages.items() if not text.strip()]
     except PdfError:
         raise
     except Exception as exc:
