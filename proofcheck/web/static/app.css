@@ -96,3 +96,14 @@ a.report, a.rowlink { color:var(--link); }
 .auth-wrap { max-width:380px; margin:3rem auto; }
 .danger { background:none; border:0; color:var(--missing); cursor:pointer; font-size:.8rem; }
 .danger:hover { text-decoration:underline; }
+
+/* Large results stay paginated; narrow screens scroll tables without overflowing. */
+.table-scroll { overflow-x: auto; max-width: 100%; }
+.table-scroll table { min-width: 760px; }
+#pagination { margin-top: 1rem; gap: 1rem; align-items: center; }
+#hint { display: inline-block; margin: .5rem 0; }
+:focus-visible { outline: 3px solid var(--accent, #2563eb); outline-offset: 3px; }
+button:disabled { cursor: not-allowed; opacity: .6; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

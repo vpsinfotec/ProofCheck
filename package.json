@@ -1,0 +1,6 @@
+{
+  "name": "proofcheck-ui-tests",
+  "private": true,
+  "scripts": { "test:ui": "node --test tests/frontend.test.cjs", "test:browser": "node tests/browser.cjs" },
+  "devDependencies": { "jsdom": "26.1.0", "playwright": "1.61.1" }
+}
