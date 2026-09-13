@@ -1,4 +1,4 @@
-# ProofCheck 0.3.0
+# ProofCheck 0.3.1
 
 Check Excel values against a PDF or image, locally. The CLI and web application share
 one processing pipeline and produce matching HTML, Excel, and JSON results.
@@ -71,9 +71,16 @@ Baseline normalization: Unicode NFKC, casefold, whitespace collapse. Optional fl
 `normalize_digits`, `strip_punctuation`, `fold_diacritics`, `reverse`. The pass rate is
 `(exact + fuzzy) / (total - skipped)`, or zero if nothing is checked.
 
+**Duplicate review:** repeated words such as `Areeb Areeb Khan` or `Areeb Khan Khan` are
+flagged in the spreadsheet and PDF. Repeated full names on the same or different pages
+include occurrence totals and per-page counts. Use the **Review duplicates** filter;
+HTML/XLSX reports include these findings too. Repetition may be intentional: review flags
+do not change status, match rate, or CLI exit codes. See [docs/DUPLICATES.md](docs/DUPLICATES.md).
+
 **Scope:** matching verifies occurrence anywhere in the document. It does not verify
-that values belong to the same person/row, count duplicate occurrences, enforce whole-word
-boundaries, or compare across page breaks. For example, a short code can occur inside a
+that values belong to the same person/row, require a particular number of appearances,
+enforce whole-word boundaries for match status, or compare across page breaks. The additional
+occurrence counts use full-value word boundaries. For example, a short code can occur inside a
 longer code. Review short identifiers and fuzzy matches. Spreadsheet values are underlying
 cell values, not Excel's displayed number formatting. Formula cells require saved cached
 results (recalculate and save in Excel first); ProofCheck does not evaluate formulas.

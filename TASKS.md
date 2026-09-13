@@ -1,4 +1,4 @@
-# Audit status — 0.3.0
+# Audit status — 0.3.1
 
 Completed scope and evidence: [docs/AUDIT.md](docs/AUDIT.md).
 
@@ -7,6 +7,8 @@ Completed scope and evidence: [docs/AUDIT.md](docs/AUDIT.md).
 - [x] Restore native PDF extraction and safe bounded OCR.
 - [x] Validate spreadsheet/document options and resource use.
 - [x] Fix Unicode snippets, threshold/tie/empty/short-fragment edge cases.
+- [x] Flag repeated first/middle/last name words and count same-page/cross-page full-value occurrences.
+- [x] Surface duplicate findings in UI, API, CLI, reports, and new history; test and benchmark the added review work.
 - [x] Fix cache corruption, write races, failed-read poisoning, and retention.
 - [x] Protect report ownership, spreadsheet exports, and session parsing.
 - [x] Keep long checks off the event loop and reject excess work.

@@ -192,3 +192,12 @@ Rewritten for non-technical readers. Now opens with a one-sentence overview (`hu
 
 Added a 'Matched via' column (`humanize.source_label`) showing Text layer vs OCR per row, with a legend entry; styled via new `.src` classes.
 
+
+## Duplicate review in 0.3.1
+
+Shared detail text now appends repeated-word location/run length and full-value occurrence
+counts by page. The summary includes a review count and explains that repetition may be
+intentional. HTML adds a Review duplicates badge beside the match status and a summary
+card; all generated evidence is escaped. Match rate does not clear review flags.
+
+See [duplicate review rules](../../docs/DUPLICATES.md).

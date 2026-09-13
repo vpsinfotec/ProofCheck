@@ -1,4 +1,4 @@
-# Frontend and backend audit — 2026-09-12
+# Frontend and backend audit — updated 2026-09-13
 
 Scope: the supplied Proofcheck(1).zip, including its existing Git history and staged source.
 No production service, production logs, real matching corpus, or deployment credentials
@@ -12,6 +12,9 @@ possible defect or operational failure has been eliminated.
 | Matching | Every cell normalized every page. | PreparedMatcher normalizes once per run. | Matcher regressions; benchmark. |
 | Matching | Exact hits still fuzzy-scored all pages. | Exact-first short circuit. | Fuzzy scorer forbidden in exact-hit test. |
 | Matching | Repeated cells recomputed all work. | Run-local memoization with independent row/diff objects. | Duplicate mutation isolation test. |
+| Matching | Repeated first/last name words could be hidden by an exact substring; middle-word duplication could break the phrase. | Separate repeated-word review index flags source and document repetitions without altering verdicts. | Areeb Areeb Khan, Areeb Khan Khan, and repeated-middle-word regressions. |
+| Matching | First exact hit hid repeated appearances on the same/later pages. | Full-value occurrence totals and page counts, with boundary and reverse-overlap rules. | Same-page/cross-page, prefix, reverse, and later-page regressions. |
+| Frontend/reports | No duplicate evidence or review filter. | Review badge, details, summary, filter, HTML/XLSX output, and persisted count; old history marked not recorded. | Real API/report integration, DOM test, and live Chromium. |
 | Matching | Best snippet recalculated on every improving candidate. | Align only the winner. | Mixed benchmark and snippet tests. |
 | Matching | Proportional raw offsets failed after Unicode/whitespace changes. | Original character span mapping. | Ligature/whitespace fixture and Unicode cases. |
 | Matching | Fuzzy ties depended on dictionary insertion order. | Numeric page sorting with first-wins ties. | Unsorted-page tie tests. |
@@ -68,7 +71,10 @@ possible defect or operational failure has been eliminated.
   Disconnecting a browser does not kill server work; hard public-service isolation is an
   OS/container responsibility. Complex native documents can exceed ordinary assumptions.
 - Matching remains document-wide substring/fuzzy occurrence, not record association,
-  whole-token identity validation, multiplicity verification, or cross-page matching.
+  whole-token identity validation, or cross-page phrase matching. Duplicate review counts
+  full-value occurrences and adjacent repeated words; it does not infer expected multiplicity
+  or unique people, enumerate approximate duplicates, or resolve extraction/layout ambiguity.
+  See [DUPLICATES.md](DUPLICATES.md).
 - Excel formulas are not recalculated and display formatting is not reproduced. Missing
   cached formula values are read as blanks; recalculate and save the source workbook.
 - Multi-frame images are rejected with a warning rather than silently checking only frame 1.

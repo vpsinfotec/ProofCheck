@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.1 — 2026-09-13
+
+### Duplicate-name review
+
+Detect adjacent repeated words in spreadsheet values and matching document text, including
+repeated first, middle, and last words. Count full-value occurrences on the same and
+different pages, even after an earlier exact hit. Normalize once, reuse review results
+for repeated cells, avoid counting longer-word prefixes, and deduplicate overlapping
+forward/reverse occurrences. Keep existing similarity verdicts and expose review evidence
+separately so intentional repetition remains a human decision.
+
+Add API occurrence/repeated-word fields, summary/history review counts, a browser review
+badge and filter, and equivalent CLI/HTML/XLSX presentation. Older history has no review
+count and displays Not recorded. Add 21 Python regressions plus a frontend regression and
+extend live Chromium verification. Update documentation and benchmark all five workloads
+with duplicate review enabled. Preserve descriptive backend/frontend/documentation commits.
+
 ## 0.3.0 — 2026-09-12
 
 ### Performance

@@ -1,4 +1,4 @@
-# Deploy ProofCheck 0.3.0
+# Deploy ProofCheck 0.3.1
 
 ProofCheck needs a Python server and a writable filesystem. OCR additionally needs the
 Tesseract executable and language packs. Static hosting alone cannot run its backend.

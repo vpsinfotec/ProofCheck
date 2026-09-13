@@ -38,3 +38,12 @@ Non-technical readers find `EXACT`/`FUZZY`/`MISSING`/`SKIPPED` and raw fuzzy sco
   summary (which stays ASCII for legacy consoles).
 - **Keep the JS twin in sync:** if you change a label here, update the `HUMAN` map in
   `proofcheck/web/static/app.js` so the live UI matches the downloadable reports.
+
+## Duplicate review in 0.3.1
+
+Shared detail text now appends repeated-word location/run length and full-value occurrence
+counts by page. The summary includes a review count and explains that repetition may be
+intentional. HTML adds a Review duplicates badge beside the match status and a summary
+card; all generated evidence is escaped. Match rate does not clear review flags.
+
+See [duplicate review rules](../../docs/DUPLICATES.md).

@@ -1,6 +1,6 @@
-# pyproject — 0.3.0 module note
+# pyproject — 0.3.1 module note
 
-Package version is 0.3.0. Core extraction uses pinned pypdfium2. FastAPI/Starlette/AnyIO boundaries are pinned to the tested combination. Package discovery includes only proofcheck and descendants. OCR/dev extras and console entrypoint remain supported.
+Package version is 0.3.1. Core extraction uses pinned pypdfium2. FastAPI/Starlette/AnyIO boundaries are pinned to the tested combination. Package discovery includes only proofcheck and descendants. OCR/dev extras and console entrypoint remain supported.
 
 Current references:
 

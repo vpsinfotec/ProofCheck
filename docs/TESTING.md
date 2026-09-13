@@ -1,7 +1,7 @@
-# Validation record — 0.3.0
+# Validation record — 0.3.1
 
-Validation used generated fixtures only. No user spreadsheets, scans, names, or production
-credentials are included in this repository.
+Validation used generated fixtures, including the names supplied as edge-case examples.
+No uploaded spreadsheets, scans, or production credentials are included in this repository.
 
 ## Baseline
 
@@ -13,20 +13,25 @@ its original suite produced **69 passes and 2 failures**: PDF extraction tests e
 
 | Check | Result |
 | --- | --- |
-| Python regression suite | 129 passed, no failures. |
-| Frontend DOM regression suite | 7 passed, no failures. |
-| Live headless Chromium | Passed real upload/check with 350 exact values, comma-containing header, pagination, search, download, picker cancellation, route return, 390px mobile layout, and no page errors. |
+| Python regression suite | 150 passed, no failures. |
+| Frontend DOM regression suite | 8 passed, no failures. |
+| Live headless Chromium | Passed real upload/check with 350 exact values, same/cross-page duplicate counts, repeated words, review filter, comma-containing header, pagination, search, download, picker cancellation, route return, 390px mobile layout, and no page errors. |
 | Python wheel | Built successfully; installed/imported outside the source tree; health and static assets verified; no documentation namespace or bytecode accidentally packaged. |
 | Dependency compatibility | pip check passed. |
 | JavaScript syntax | node --check passed. |
 | Source whitespace validation | git diff --check passed. |
-| Synthetic benchmarks | 4 workload comparisons, 3 repetitions each, expected/status/page/score parity. |
+| Synthetic benchmarks | 5 workload comparisons, 3 repetitions each, expected/status/page/score parity. |
 
 Environment: Linux x86_64, Python 3.12.14, Node 24.19.0. Runtime dependencies are specified
 in pyproject.toml; frontend test dependencies are locked in package-lock.json. Browser
 verification used Chromium 153 supplied as a local executable with Playwright 1.61.1.
 The default Playwright browser download was unavailable in this environment; the same
 committed test ran against the local Chromium executable through CHROMIUM_PATH.
+
+New duplicate regressions cover the concrete Areeb examples, repeated middle words,
+source repetitions, later-page findings, Unicode/normalization, boundaries, reverse
+overlap, cache isolation, legacy history, and real API/HTML/XLSX propagation. The
+duplicate-name benchmark checks all occurrence totals and repeated-word findings.
 
 The Python suite emits two upstream deprecation warnings: Starlette's compatibility with
 httpx and an AnyIO BlockingPortal alias. They are not application test failures. The npm

@@ -9,6 +9,7 @@
 | Pipeline | Validate run configuration, load values, extract document text, prepare matcher, aggregate results and timings. |
 | Excel / document / PDF / images | Input decoding only; no UI or matching semantics. |
 | PreparedMatcher / normalization | Deterministic comparisons, normalized page reuse, duplicate result reuse, source span mapping. |
+| DuplicateAuditor | Full-value occurrence counts and repeated-word review on shared normalized text; no verdict rewriting. |
 | OCR / cache | Recognition strategies, safe rendering, bounded native/subprocess work, atomic content-addressed retention. |
 | Models / web schemas | Internal dataclasses and stable, additive JSON boundary. |
 | Report writers / humanize | Presentation from RunResult only; HTML escaping and inert Excel string cells. |
@@ -41,9 +42,11 @@ tie-breaking. SQLite uses WAL and every connection closes explicitly after its t
 
 ## Matching and display
 
-Pages are normalized once. An exact scan precedes fuzzy scoring and stops at the first
-page. Repeated expected strings reuse result computation, but rows receive independent
-result instances and diff lists. Fuzzy scanning keeps the highest score, with earliest-page
+Pages are normalized once. An exact scan precedes fuzzy scoring and selects the first
+matching page. Duplicate review separately scans all normalized pages and uses a prepared
+repeated-word index, so later occurrences are retained without invoking fuzzy scoring for
+exact hits. Repeated expected strings reuse both match and review computation, but rows
+receive independent result instances, diff lists, and review lists. Fuzzy scanning keeps the highest score, with earliest-page
 ties. Only its winning alignment is mapped to raw source spans. Combining sequences,
 compatibility forms, casefold expansion, and whitespace are handled in the span mapping.
 
@@ -52,6 +55,9 @@ sequence IDs. Aborting an older request alone is not enough: a late reply is als
 Run state is global to prevent duplicate checks and to survive route navigation. It is
 not persisted across page reloads. Rendering flattens rows once, precomputes search text,
 and inserts at most 100 rows; search input is debounced. Untrusted text is escaped.
+Duplicate findings and their count come from the backend; the UI only renders and filters
+them. Similarity status remains visible alongside the duplicate review badge. Old history
+has a nullable review count to distinguish unaudited runs from runs with zero findings.
 
 ## Persistence
 

@@ -58,16 +58,22 @@ def main():
         'exact_unique': [f'Delegate {i:04d}' for i in range(300)],
         'exact_repeated': [f'Delegate {i%30:04d}' for i in range(600)],
         'fuzzy_and_missing': [f'Dellegate {i:04d}' for i in range(50)]+[f'ZZQX unknown {i:04d}' for i in range(30)],
+        'duplicate_names': [f'Areeb {i%30:04d} Khan' for i in range(600)],
     }
     report={'baseline_commit':BASELINE,'python':sys.version.split()[0], 'repeats':3,
+            'duplicate_review_enabled':True,
             'dependencies':{p:importlib.metadata.version(p) for p in ['rapidfuzz','pdfplumber','pypdfium2','fastapi','starlette']},'workloads':[]}
     for name,values in workloads.items():
-        old_time,old,old_samples=measure(lambda:[baseline_matcher.match_value(v,pages) for v in values])
+        active_pages = ({p + 1: '\n'.join(f'Areeb Areeb {i:04d} Khan\nAreeb {i:04d} Khan'
+                        for i in range(30)) for p in range(20)} if name == 'duplicate_names' else pages)
+        old_time,old,old_samples=measure(lambda:[baseline_matcher.match_value(v,active_pages) for v in values])
         def current():
-            m=PreparedMatcher(pages)
+            m=PreparedMatcher(active_pages)
             return [m.match(v) for v in values]
         new_time,new,new_samples=measure(current)
         assert verdicts(old)==verdicts(new), name
+        if name == 'duplicate_names':
+            assert all(r.needs_review and r.occurrence_count == 40 and len(r.repeated_words) == 20 for r in new)
         report['workloads'].append({'name':name,'values':len(values),'pages':len(pages),'baseline_seconds':old_time,'updated_seconds':new_time,'speedup':old_time/new_time,'baseline_samples':old_samples,'updated_samples':new_samples,'verdict_parity':True})
         print(name, round(old_time,4), round(new_time,4), round(old_time/new_time,1), flush=True)
     with tempfile.TemporaryDirectory() as temp:

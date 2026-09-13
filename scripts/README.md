@@ -40,7 +40,7 @@ and continues — ProofCheck still works, just with OCR disabled until the engin
 > install location. On Windows it also auto-discovers `C:\Program Files\Tesseract-OCR`.
 
 
-## 0.3.0 validation and benchmarks
+## 0.3.1 validation and benchmarks
 
 The application does not need Node at runtime. Frontend developer checks use `npm ci`
 and `npm run test:ui` from the repository root. For live browser testing, install

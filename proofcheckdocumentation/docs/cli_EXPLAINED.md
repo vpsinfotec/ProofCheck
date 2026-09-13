@@ -1,4 +1,4 @@
-# cli — 0.3.0 module note
+# cli — 0.3.1 module note
 
 CLI options adapt into the shared pipeline. inspect honors sheet and header row. check cannot overwrite inputs or reuse output paths. Page ranges are bounded before expansion. Exit codes are 0 success, 1 missing values, and 2 invalid inputs/report failures.
 
@@ -12,3 +12,9 @@ Current references:
 
 The supplied implementation and former explanation remain available in Git baseline
 `9c9502c`. The current source is authoritative for exact signatures and behavior.
+
+## Duplicate review in 0.3.1
+
+Checks print a duplicate-review count when findings exist. HTML/XLSX details identify repeated words and occurrence pages. Existing missing-value exit codes are unchanged; review flags do not automatically fail a check.
+
+See [duplicate review rules](../../docs/DUPLICATES.md).

@@ -1,4 +1,4 @@
-# API reference for 0.3.0
+# API reference for 0.3.1
 
 The web UI and API use the same origin. Cookie authentication applies to inspection,
 checks, history, and reports when enabled. All API/report responses are non-cacheable.
@@ -46,6 +46,27 @@ also includes ownership/history persistence. Match timing includes document prep
 Each row retains row, expected, status, page, best_match, score, diff, and source.
 `diff` is a list of `[operation, text]` pairs. Status decisions use the unrounded score;
 `score` is the integer display value. Clients must render strings as text or escape HTML.
+
+## Duplicate review (additive in 0.3.1)
+
+Each row adds:
+
+| Field | Meaning |
+| --- | --- |
+| `occurrence_count` | Sum of full-value, non-overlapping occurrences across extracted pages. |
+| `occurrences` | Sorted list of `{ "page": 1, "count": 2 }`, omitting zero-count pages. |
+| `repeated_words` | List of `{ "word": "areeb", "count": 2, "page": 1 }`; `page: null` means the spreadsheet value. Count is the largest consecutive run for that word at that location. Words are normalized. |
+| `needs_review` | True when occurrence count exceeds 1 or repeated-word findings exist. |
+
+`summary.duplicate_review` counts flagged cells across selected columns. It is an integer
+in every new check and is persisted in history. Older history records return `null` for
+this field, meaning not recorded; clients should not interpret that as zero findings.
+
+Statuses, scores, primary page, pass rate, and error codes retain their existing meaning.
+An `EXACT` result can also have `needs_review: true`. Review duplicate evidence independently
+of match status. These fields describe extracted text, not unique people. Counting uses
+word boundaries and configured normalization; approximate duplicates and cross-page phrases
+are not counted. See [DUPLICATES.md](DUPLICATES.md) for examples and limitations.
 
 ## Errors
 
