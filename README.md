@@ -1,4 +1,4 @@
-# ProofCheck 0.3.1
+# ProofCheck 0.3.2
 
 Check Excel values against a PDF or image, locally. The CLI and web application share
 one processing pipeline and produce matching HTML, Excel, and JSON results.
@@ -111,6 +111,10 @@ Default limits include 50 MiB per upload, two concurrent inspections/checks per 
 process, 1,000 pages, 100,000 spreadsheet data rows, 200,000 selected cells, 10 million
 extracted characters, and 40 million pixels per rendered page/image. OCR DPI is 72–600.
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for all settings and tradeoffs.
+For larger local PDFs, version 0.3.2 accepts `MAX_UPLOAD_MB` up to `10240` (10 GiB).
+The configuration guide includes a Windows launch command and troubleshooting for the
+old `between 1 and 5120` startup error. Raising admission limits does not guarantee
+multi-gigabyte processing capacity; page/text limits and disk requirements still apply.
 
 Duplicate nonblank headers are rejected, rather than silently checking the wrong column.
 Empty/corrupt files and invalid options return readable errors. Multi-frame images are

@@ -5,7 +5,7 @@ Invalid resource settings fail with an explanatory configuration error.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| MAX_UPLOAD_MB | 50 | MiB per file; valid configuration range 1–5120. |
+| MAX_UPLOAD_MB | 50 | MiB per file; valid configuration range 1–10240 (up to 10 GiB) as of 0.3.2. |
 | PROOFCHECK_MAX_CONCURRENT_CHECKS | 2 | Checks plus inspections admitted per process, 1–8; extra requests get 429 and Retry-After. |
 | PROOFCHECK_PDF_ENGINE | auto | auto chooses pdfium; pdfplumber remains available. Different extraction layouts can change results. |
 | PROOFCHECK_MAX_PAGES | 1000 | Maximum PDF pages or image files in a folder. |
@@ -49,6 +49,42 @@ The aggregate request-body limit for inspection/checking is twice the per-file l
 1 MiB for multipart fields. Both Content-Length and actual streamed bytes are checked.
 Individual uploads are still checked independently. Login/registration bodies are capped
 at 16 KiB; their rate is limited to 20 requests/minute per client IP per process.
+
+## Larger local PDFs on Windows
+
+Version 0.3.2 raises the configurable upload ceiling from 5 to 10 GiB. The default remains
+50 MiB; use `10240` for a 10 GiB per-file allowance. Stop the server, then run from the
+updated project folder in PowerShell:
+
+```powershell
+$env:MAX_UPLOAD_MB="10240"; $env:PROOFCHECK_MAX_CONCURRENT_CHECKS="1"; .\.venv\Scripts\python.exe -m proofcheck.cli serve --host 127.0.0.1 --port 8000
+```
+
+Refresh the browser so its health response supplies the new file limit. These settings
+apply to this PowerShell session and its child server; they are not saved globally. Merely
+editing an `.env` file does not load it into a direct launch. Docker users must also update
+the `MAX_UPLOAD_MB` value in their Compose environment and recreate the service.
+
+If startup still says **between 1 and 5120**, the running source is older than this fix.
+Check which package the chosen interpreter actually loads (this works even while the
+old app would fail on the upload setting):
+
+```powershell
+.\.venv\Scripts\python.exe -c "import proofcheck; print(proofcheck.__version__); print(proofcheck.__file__)"
+```
+
+It should print `0.3.2` and the updated project location. To install that checkout into
+the environment, run `.\.venv\Scripts\python.exe -m pip install -e ".[ocr]"` from its root,
+then restart the server. A fresh extraction needs the setup step described in the README.
+
+This changes admission limits, not processing capacity. Browser uploads are spooled before
+being copied to the processing tempfile: a 5 GiB file can require about 10 GiB of temporary
+disk space in addition to the original, OCR workspace, and reports. Page/text/pixel limits
+remain separate. Local CLI `check` reads the existing input path without the browser upload
+cap or those upload copies, but still enforces processing limits. Reverse proxies or hosted
+services can impose their own upload/time limits. Multi-gigabyte PDF extraction, matching,
+and OCR have not been validated on a representative corpus; the startup tests use declared
+lengths and configuration checks without allocating multi-gigabyte uploads.
 
 These limits bound ordinary workloads. They do not provide OS-level CPU/memory isolation
 for hostile documents or a hard whole-request deadline. Use a container/process boundary

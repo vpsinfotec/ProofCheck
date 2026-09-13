@@ -1,4 +1,4 @@
-# Validation record — 0.3.1
+# Validation record — 0.3.2
 
 Validation used generated fixtures, including the names supplied as edge-case examples.
 No uploaded spreadsheets, scans, or production credentials are included in this repository.
@@ -13,7 +13,8 @@ its original suite produced **69 passes and 2 failures**: PDF extraction tests e
 
 | Check | Result |
 | --- | --- |
-| Python regression suite | 150 passed, no failures. |
+| Python regression suite | 154 passed, no failures (0.3.2). |
+| Upload configuration regression | Fresh processes accept the 50 MiB default, 6 GiB and 10 GiB settings; above 10 GiB fails clearly. Health and aggregate request-length arithmetic verified without allocating large files. |
 | Frontend DOM regression suite | 8 passed, no failures. |
 | Live headless Chromium | Passed real upload/check with 350 exact values, same/cross-page duplicate counts, repeated words, review filter, comma-containing header, pagination, search, download, picker cancellation, route return, 390px mobile layout, and no page errors. |
 | Python wheel | Built successfully; installed/imported outside the source tree; health and static assets verified; no documentation namespace or bytecode accidentally packaged. |
@@ -21,6 +22,10 @@ its original suite produced **69 passes and 2 failures**: PDF extraction tests e
 | JavaScript syntax | node --check passed. |
 | Source whitespace validation | git diff --check passed. |
 | Synthetic benchmarks | 5 workload comparisons, 3 repetitions each, expected/status/page/score parity. |
+
+The Python suite was rerun for 0.3.2. Frontend, live-browser, wheel, dependency and benchmark
+results above were recorded for 0.3.1; those gates were not repeated for this upload-range
+and version change. Multi-gigabyte PDF processing itself remains unvalidated.
 
 Environment: Linux x86_64, Python 3.12.14, Node 24.19.0. Runtime dependencies are specified
 in pyproject.toml; frontend test dependencies are locked in package-lock.json. Browser

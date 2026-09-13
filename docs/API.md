@@ -1,7 +1,9 @@
-# API reference for 0.3.1
+# API reference for 0.3.2
 
 The web UI and API use the same origin. Cookie authentication applies to inspection,
 checks, history, and reports when enabled. All API/report responses are non-cacheable.
+Version 0.3.2 accepts `MAX_UPLOAD_MB` from 1 to 10240 MiB, retaining the 50 MiB default.
+Health returns the configured size in bytes; the bundled UI adopts it without a source edit.
 
 | Endpoint | Behavior |
 | --- | --- |

@@ -1,4 +1,4 @@
-# Developer guide — ProofCheck 0.3.1
+# Developer guide — ProofCheck 0.3.2
 
 Read the root README and docs/ARCHITECTURE.md before changing the pipeline.
 

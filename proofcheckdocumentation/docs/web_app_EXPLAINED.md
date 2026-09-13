@@ -18,3 +18,10 @@ The supplied implementation and former explanation remain available in Git basel
 Serialization exposes duplicate counts, repeated-word evidence and needs_review; persisted history includes duplicate_review. Old records deserialize with null, never a misleading zero. There is no extra extraction/OCR pass.
 
 See [duplicate review rules](../../docs/DUPLICATES.md).
+
+## Upload configuration in 0.3.2
+
+MAX_UPLOAD_MB now accepts 1–10240 MiB, retaining its 50 MiB default. The setting is read at
+import, and /api/health supplies its byte value to the UI. Restart after changing it. See
+[configuration and stale-install troubleshooting](../../docs/CONFIGURATION.md). Raising
+the cap does not remove page/text/pixel limits or validate multi-gigabyte processing.

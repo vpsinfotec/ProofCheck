@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2 — 2026-09-13
+
+Fix startup with `MAX_UPLOAD_MB` above 5120 by raising its configurable ceiling to 10240
+MiB (10 GiB). Keep the 50 MiB default and all streamed/per-file enforcement. Add four
+fresh-process regressions for default, 6 GiB, 10 GiB, and above-ceiling configuration,
+including health propagation and aggregate length checks beyond 32-bit sizes. Document
+Windows launch commands, stale-install diagnosis, temporary disk requirements, and the
+distinction between upload admission and unvalidated multi-gigabyte processing capacity.
+
 ## 0.3.1 — 2026-09-13
 
 ### Duplicate-name review

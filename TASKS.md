@@ -1,4 +1,4 @@
-# Audit status — 0.3.1
+# Audit status — 0.3.2
 
 Completed scope and evidence: [docs/AUDIT.md](docs/AUDIT.md).
 
@@ -15,6 +15,7 @@ Completed scope and evidence: [docs/AUDIT.md](docs/AUDIT.md).
 - [x] Fix frontend races, duplicate submissions, error display, and large result rendering.
 - [x] Verify real file flow in Chromium and mobile layout.
 - [x] Update documentation, benchmark evidence, and release packaging.
+- [x] Fix startup with 6–10 GiB upload settings; verify health/length handling and document large-file setup.
 
 Explicit future work, not included in this release:
 

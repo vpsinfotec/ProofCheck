@@ -37,7 +37,7 @@ from . import auth, schemas, store
 from .middleware import ResourceLimitsMiddleware
 
 # ---- Configuration (env-driven, MVP-appropriate defaults) -------------------
-MAX_UPLOAD_MB = env_int("MAX_UPLOAD_MB", 50, 1, 5120)
+MAX_UPLOAD_MB = env_int("MAX_UPLOAD_MB", 50, 1, 10240)
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 CORS_ORIGINS = [
     o.strip()

@@ -38,6 +38,7 @@ possible defect or operational failure has been eliminated.
 | API | CPU/filesystem work blocked async event loop. | Synchronous threadpool routes. | Health response while check is blocked. |
 | API | Size checked only after multipart had spooled upload. | Content-Length and streamed aggregate limits before parsing, per-file validation retained. | Declared and chunked 413 tests. |
 | API | Unbounded simultaneous expensive checks. | Process-local admission and Retry-After. | Busy request rejected without reading body. |
+| API configuration | Upload settings above 5 GiB failed at startup despite the newly requested larger-file workflow. | Configurable ceiling raised to 10 GiB in 0.3.2; default remains 50 MiB. | Fresh-process configuration/health and aggregate-length regressions; no multi-gigabyte processing claim. |
 | API | Second-upload failures could risk partial file retention. | Cleanup on every path, including empty/oversize uploads. | Tempfile cleanup regressions. |
 | API | Comma/newline headers could not be selected reliably. | Add columns_json; retain legacy columns. | Real comma-header API and browser checks. |
 | API | Arbitrary DPI/threshold/PSM/language/boolean inputs. | Typed validation and shared pipeline validation. | Invalid option parametrization. |
