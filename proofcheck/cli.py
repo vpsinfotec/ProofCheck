@@ -126,6 +126,9 @@ def check(
                f"Pass rate: {s.pass_rate * 100:.1f}%")
     for w in result.warnings:
         click.echo(f"  ! {w}", err=True)
+    if s.duplicate_review:
+        click.echo(f"  ! Review duplicates: {s.duplicate_review} values. "
+                   "See HTML/XLSX details for repeated words and page counts.", err=True)
 
     if html_out:
         from . import report_html

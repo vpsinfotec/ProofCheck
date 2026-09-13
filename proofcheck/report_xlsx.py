@@ -83,6 +83,7 @@ def build(result: RunResult) -> Workbook:
         ("Not found", s.missing),
         ("Blank (skipped)", s.skipped),
         ("Match rate", f"{s.pass_rate * 100:.0f}%"),
+        ("Review duplicates", s.duplicate_review),
     ]
     for label_text, value in rows:
         _append(summary_ws, [label_text, value])
@@ -113,7 +114,8 @@ def build(result: RunResult) -> Workbook:
             _append(ws, [
                 r.row,
                 r.expected,
-                f"{humanize.icon(r.status)} {humanize.label(r.status)}",
+                f"{humanize.icon(r.status)} {humanize.label(r.status)}" +
+                (" — Review duplicates" if r.needs_review else ""),
                 humanize.source_label(r.source),
                 humanize.detail(r),
             ])

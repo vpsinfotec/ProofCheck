@@ -55,6 +55,9 @@ def summary_sentence(result: RunResult) -> str:
     if s.skipped:
         bp = "s were" if s.skipped != 1 else " was"
         sentence += f" {s.skipped} blank cell{bp} skipped."
+    if s.duplicate_review:
+        sentence += (f" Review duplicates in {s.duplicate_review} value(s); "
+                     "repetition may be intentional. Match rate does not clear these flags.")
     return sentence
 
 
@@ -69,6 +72,18 @@ def source_label(source: str | None) -> str:
 
 def detail(r: MatchResult) -> str:
     """A plain-English explanation of one result (no markup)."""
+    parts = [_match_detail(r)]
+    if r.occurrence_count > 1:
+        pages = "; ".join(f"page {o.page}: {o.count}" for o in r.occurrences)
+        parts.append(f"Review duplicates: {r.occurrence_count} full-value occurrences ({pages}).")
+    for word in r.repeated_words:
+        where = "spreadsheet value" if word.page is None else f"PDF on page {word.page}"
+        parts.append(f"Review repeated word in {where}: “{word.word}” "
+                     f"({word.count} consecutive uses).")
+    return " ".join(parts)
+
+
+def _match_detail(r: MatchResult) -> str:
     where = f"page {r.page}" if r.page else "the PDF"
     if r.status is Status.EXACT:
         return f"Found on {where}."

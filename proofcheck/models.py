@@ -30,6 +30,23 @@ class Status(str, Enum):
 DiffOp = tuple[str, str]
 
 
+@dataclass(frozen=True)
+class PageOccurrences:
+    """Full-value occurrences in one page's normalized extracted text."""
+
+    page: int
+    count: int
+
+
+@dataclass(frozen=True)
+class RepeatedWord:
+    """A repeated adjacent word; page=None means the spreadsheet value itself."""
+
+    word: str
+    count: int  # largest consecutive run at this location, at least 2
+    page: int | None = None
+
+
 @dataclass
 class MatchResult:
     """Result of checking one spreadsheet cell against the PDF."""
@@ -44,6 +61,16 @@ class MatchResult:
     # How the matched page's text was obtained: "text" (embedded text layer), "OCR"
     # (recovered from a scanned page), or None when there is no matched page (skipped).
     source: str | None = None
+    occurrences: list[PageOccurrences] = field(default_factory=list)
+    repeated_words: list[RepeatedWord] = field(default_factory=list)
+
+    @property
+    def occurrence_count(self) -> int:
+        return sum(item.count for item in self.occurrences)
+
+    @property
+    def needs_review(self) -> bool:
+        return self.occurrence_count > 1 or bool(self.repeated_words)
 
 
 @dataclass
@@ -90,6 +117,7 @@ class Summary:
     missing: int = 0
     skipped: int = 0
     pass_rate: float = 0.0  # (exact + fuzzy) / checked, rounded to 4 dp; checked excludes skipped
+    duplicate_review: int = 0  # checked cells with repeated words/multiple document occurrences
 
 
 @dataclass

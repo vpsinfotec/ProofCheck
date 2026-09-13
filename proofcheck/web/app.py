@@ -196,6 +196,7 @@ def _serialize(result: RunResult, run_id: str) -> dict:
             missing=result.summary.missing,
             skipped=result.summary.skipped,
             pass_rate=result.summary.pass_rate,
+            duplicate_review=result.summary.duplicate_review,
         ),
         columns=[
             schemas.ColumnResultModel(
@@ -210,6 +211,12 @@ def _serialize(result: RunResult, run_id: str) -> dict:
                         score=r.score,
                         diff=[(op, text) for op, text in r.diff],
                         source=r.source,
+                        occurrence_count=r.occurrence_count,
+                        occurrences=[schemas.PageOccurrencesModel(page=o.page, count=o.count)
+                                     for o in r.occurrences],
+                        repeated_words=[schemas.RepeatedWordModel(word=w.word, count=w.count, page=w.page)
+                                        for w in r.repeated_words],
+                        needs_review=r.needs_review,
                     )
                     for r in col.results
                 ],
@@ -235,6 +242,7 @@ def _summary_dict(result: RunResult) -> dict:
     return {
         "total": s.total, "exact": s.exact, "fuzzy": s.fuzzy,
         "missing": s.missing, "skipped": s.skipped, "pass_rate": s.pass_rate,
+        "duplicate_review": s.duplicate_review,
     }
 
 

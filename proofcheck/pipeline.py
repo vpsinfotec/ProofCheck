@@ -33,6 +33,7 @@ def _summarize(columns: list[ColumnResult]) -> Summary:
     for col in columns:
         for r in col.results:
             summary.total += 1
+            summary.duplicate_review += int(r.needs_review)
             if r.status is Status.EXACT:
                 summary.exact += 1
             elif r.status is Status.FUZZY:

@@ -12,6 +12,7 @@ from difflib import SequenceMatcher
 from rapidfuzz import fuzz
 from rapidfuzz.fuzz import partial_ratio_alignment
 
+from .duplicates import DuplicateAuditor
 from .models import DiffOp, MatchResult, Status
 from .normalize import normalize, reverse_words
 
@@ -61,6 +62,7 @@ class PreparedMatcher:
                             fold_diacritics=fold_diacritics)
         self.pages = [(n, raw, normalize(raw, **self.options))
                       for n, raw in sorted(pages.items())]
+        self.duplicate_auditor = DuplicateAuditor([(n, hay) for n, _, hay in self.pages])
         self.cache: dict[str, MatchResult] = {}
         self.spans: dict[int, list[tuple[int, int]]] = {}
 
@@ -70,7 +72,8 @@ class PreparedMatcher:
         if expected_str not in self.cache:
             self.cache[expected_str] = self._match(expected_str)
         cached = self.cache[expected_str]
-        return replace(cached, row=row, diff=list(cached.diff))
+        return replace(cached, row=row, diff=list(cached.diff),
+                       occurrences=list(cached.occurrences), repeated_words=list(cached.repeated_words))
 
     def _match(self, expected: str) -> MatchResult:
         needle = normalize(expected, **self.options)
@@ -79,6 +82,12 @@ class PreparedMatcher:
         needles = [needle]
         if self.reverse and (rev := reverse_words(needle)) != needle:
             needles.append(rev)
+
+        result = self._match_primary(expected, needle, needles)
+        result.occurrences, result.repeated_words = self.duplicate_auditor.inspect(needle, needles)
+        return result
+
+    def _match_primary(self, expected: str, needle: str, needles: list[str]) -> MatchResult:
 
         # Sorted pages make exact and fuzzy ties stable regardless of dict order.
         for number, raw, hay in self.pages:
