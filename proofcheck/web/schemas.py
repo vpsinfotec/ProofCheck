@@ -20,6 +20,8 @@ class HealthResponse(BaseModel):
     # Lets a frontend decide whether to show a login screen without a second request.
     auth_enabled: bool = False
     ocr_available: bool = False
+    max_upload_bytes: int = 0
+    registration_enabled: bool = False
 
 
 class InspectResponse(BaseModel):
@@ -40,6 +42,17 @@ class DiffPair(BaseModel):
     text: str
 
 
+class PageOccurrencesModel(BaseModel):
+    page: int
+    count: int
+
+
+class RepeatedWordModel(BaseModel):
+    word: str
+    count: int
+    page: int | None = None
+
+
 class MatchResultModel(BaseModel):
     row: int
     expected: str
@@ -51,6 +64,10 @@ class MatchResultModel(BaseModel):
     diff: list[tuple[str, str]] = Field(default_factory=list)
     # How the matched page's text was obtained: "text" | "OCR" | null (no matched page).
     source: str | None = None
+    occurrence_count: int = 0
+    occurrences: list[PageOccurrencesModel] = Field(default_factory=list)
+    repeated_words: list[RepeatedWordModel] = Field(default_factory=list)
+    needs_review: bool = False
 
 
 class ColumnResultModel(BaseModel):
@@ -73,6 +90,7 @@ class SummaryModel(BaseModel):
     missing: int
     skipped: int
     pass_rate: float
+    duplicate_review: int | None = None  # old history predates duplicate auditing
 
 
 class ReportUrls(BaseModel):
@@ -88,6 +106,7 @@ class CheckResponse(BaseModel):
     columns: list[ColumnResultModel]
     warnings: list[str] = Field(default_factory=list)
     report_urls: ReportUrls
+    timings: dict[str, float] = Field(default_factory=dict)
 
 
 class ErrorResponse(BaseModel):
@@ -98,8 +117,8 @@ class ErrorResponse(BaseModel):
 
 # ---- Auth (optional feature) ------------------------------------------------
 class Credentials(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class AuthUser(BaseModel):

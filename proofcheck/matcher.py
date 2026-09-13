@@ -12,6 +12,7 @@ from difflib import SequenceMatcher
 from rapidfuzz import fuzz
 from rapidfuzz.fuzz import partial_ratio_alignment
 
+from .duplicates import DuplicateAuditor
 from .models import DiffOp, MatchResult, Status
 from .normalize import normalize, reverse_words
 
@@ -42,172 +43,99 @@ def build_diff(expected: str, best_match: str) -> list[DiffOp]:
     return diff
 
 
-def _adjacent_duplicate(cand: str, hay: str) -> str | None:
-    """Detect a duplicated trailing word (e.g. a repeated surname) at a match site.
+class PreparedMatcher:
+    """A run-scoped, normalized document with deterministic ties and result reuse.
 
-    ``cand`` is a normalized needle that occurs verbatim in ``hay``. If the run of
-    words matching ``cand`` is *immediately followed* by one or more repeats of its
-    last word, return the normalized ``cand + repeated word(s)`` text (e.g.
-    ``"jordan avery avery"``); otherwise return ``None``.
-
-    This is what makes a duplicated surname visible: a plain substring test treats
-    ``"jordan avery"`` as found inside ``"jordan avery avery"`` and reports EXACT,
-    hiding the extra word. Token-based and deterministic — no scoring, no heuristics.
+    Exact hits never invoke fuzzy scoring. Only the winning fuzzy alignment is
+    mapped to the original page, and repeated cells reuse an independent result.
     """
-    n = cand.split()
-    h = hay.split()
-    if not n:
-        return None
-    span = len(n)
-    for i in range(len(h) - span + 1):
-        if h[i:i + span] == n:
-            j = i + span
-            while j < len(h) and h[j] == n[-1]:
-                j += 1
-            if j > i + span:
-                return " ".join(h[i:j])
-    return None
 
+    def __init__(self, pages: dict[int, str], *, fuzzy_threshold: int = 90,
+                 normalize_digits: bool = False, strip_punctuation: bool = False,
+                 fold_diacritics: bool = False, reverse: bool = False):
+        if not 0 <= fuzzy_threshold <= 100:
+            raise ValueError("Fuzzy threshold must be between 0 and 100.")
+        self.threshold = fuzzy_threshold
+        self.reverse = reverse
+        self.options = dict(normalize_digits=normalize_digits,
+                            strip_punctuation=strip_punctuation,
+                            fold_diacritics=fold_diacritics)
+        self.pages = [(n, raw, normalize(raw, **self.options))
+                      for n, raw in sorted(pages.items())]
+        self.duplicate_auditor = DuplicateAuditor([(n, hay) for n, _, hay in self.pages])
+        self.cache: dict[str, MatchResult] = {}
+        self.spans: dict[int, list[tuple[int, int]]] = {}
 
-def _best_snippet(needle_norm: str, haystack_raw: str, haystack_norm: str) -> str:
-    """Return the slice of the raw page text aligned to the best fuzzy match.
+    def match(self, expected: object, *, row: int = 0) -> MatchResult:
+        from dataclasses import replace
+        expected_str = "" if expected is None else str(expected)
+        if expected_str not in self.cache:
+            self.cache[expected_str] = self._match(expected_str)
+        cached = self.cache[expected_str]
+        return replace(cached, row=row, diff=list(cached.diff),
+                       occurrences=list(cached.occurrences), repeated_words=list(cached.repeated_words))
 
-    rapidfuzz alignment indexes into the normalized haystack; since normalization can
-    change length, we proportionally map those indices back onto the raw text so the
-    snippet shown to the user reflects what's actually in the PDF.
-    """
-    if not haystack_norm:
-        return ""
-    align = partial_ratio_alignment(needle_norm, haystack_norm)
-    if align is None:
-        return ""
-    n = len(haystack_norm)
-    ratio = len(haystack_raw) / n if n else 1.0
-    start = int(align.dest_start * ratio)
-    end = int(align.dest_end * ratio)
-    return haystack_raw[start:end].strip() or haystack_norm[align.dest_start:align.dest_end]
-
-
-def normalize_pages(
-    pages: dict[int, str],
-    *,
-    normalize_digits: bool = False,
-    strip_punctuation: bool = False,
-    fold_diacritics: bool = False,
-) -> dict[int, str]:
-    """Pre-normalize every page's text once, for reuse across many :func:`match_value` calls.
-
-    Page normalization depends only on the run-wide flags, not on the expected value, so
-    it is identical for every value checked in a run. Computing it once here and passing
-    the result into ``match_value(..., pages_norm=...)`` avoids re-normalizing the full text
-    of every page for every single value — the difference between a run finishing in
-    seconds and one that appears to hang on a large spreadsheet + multi-page PDF.
-    """
-    return {
-        page_num: normalize(
-            raw,
-            normalize_digits=normalize_digits,
-            strip_punctuation=strip_punctuation,
-            fold_diacritics=fold_diacritics,
-        )
-        for page_num, raw in pages.items()
-    }
-
-
-def match_value(
-    expected: object,
-    pages: dict[int, str],
-    *,
-    fuzzy_threshold: int = 90,
-    normalize_digits: bool = False,
-    strip_punctuation: bool = False,
-    fold_diacritics: bool = False,
-    reverse: bool = False,
-    row: int = 0,
-    pages_norm: dict[int, str] | None = None,
-) -> MatchResult:
-    """Match a single expected value against all PDF pages.
-
-    ``pages_norm`` is an optional map of ``{page_num: normalized_text}`` produced by
-    :func:`normalize_pages` with the same flags. When supplied it is reused verbatim so the
-    expensive page normalization runs once per run instead of once per value; when omitted
-    (e.g. a standalone/test call) each page is normalized inline as before.
-    """
-    if _is_blank(expected):
-        return MatchResult(row=row, expected="" if expected is None else str(expected),
-                            status=Status.SKIPPED)
-
-    expected_str = str(expected)
-    norm_kwargs = dict(
-        normalize_digits=normalize_digits,
-        strip_punctuation=strip_punctuation,
-        fold_diacritics=fold_diacritics,
-    )
-    needle = normalize(expected_str, **norm_kwargs)
-
-    # The candidate forms we'll try; reverse adds the swapped-word-order variant.
-    needles = [needle]
-    if reverse:
-        rev = reverse_words(needle)
-        if rev != needle:
+    def _match(self, expected: str) -> MatchResult:
+        needle = normalize(expected, **self.options)
+        if not needle:
+            return MatchResult(row=0, expected=expected, status=Status.SKIPPED)
+        needles = [needle]
+        if self.reverse and (rev := reverse_words(needle)) != needle:
             needles.append(rev)
 
-    best_page: int | None = None
-    best_score = -1.0
-    best_snippet = ""
-    exact_page: int | None = None
-    dup_page: int | None = None
-    dup_snippet = ""  # raw PDF text of the name INCLUDING the duplicated word
+        result = self._match_primary(expected, needle, needles)
+        result.occurrences, result.repeated_words = self.duplicate_auditor.inspect(needle, needles)
+        return result
 
-    for page_num, raw in pages.items():
-        hay = pages_norm[page_num] if pages_norm is not None else normalize(raw, **norm_kwargs)
-        if not hay:
-            continue
-        for cand in needles:
-            if cand and cand in hay:
-                dup = _adjacent_duplicate(cand, hay)
-                if dup is None:
-                    # Clean exact substring hit — record the earliest page.
-                    if exact_page is None or page_num < exact_page:
-                        exact_page = page_num
-                elif dup_page is None or page_num < dup_page:
-                    # Found, but the PDF repeats a trailing word (e.g. a duplicated
-                    # surname). Keep the raw snippet so the report shows the extra text.
-                    dup_page = page_num
-                    dup_snippet = _best_snippet(dup, raw, hay)
-            score = fuzz.partial_ratio(cand, hay)
-            if score > best_score:
-                best_score = score
-                best_page = page_num
-                best_snippet = _best_snippet(cand, raw, hay)
+    def _match_primary(self, expected: str, needle: str, needles: list[str]) -> MatchResult:
 
-    # A clean match anywhere wins: the value genuinely appears verbatim.
-    if exact_page is not None:
+        # Sorted pages make exact and fuzzy ties stable regardless of dict order.
+        for number, raw, hay in self.pages:
+            if any(cand in hay for cand in needles):
+                return MatchResult(row=0, expected=expected, status=Status.EXACT,
+                                   page=number, best_match=expected, score=100)
+
+        best_score = -1.0
+        best = None
+        for number, raw, hay in self.pages:
+            if not hay:
+                continue
+            for cand in needles:
+                scorer = fuzz.ratio if len(hay) < len(cand) else fuzz.partial_ratio
+                score = scorer(cand, hay, score_cutoff=max(0, best_score))
+                if score > best_score:
+                    best_score = score
+                    best = (number, raw, hay, cand)
+        if best is None or best_score <= 0:
+            return MatchResult(row=0, expected=expected, status=Status.MISSING)
+
+        number, raw, hay, cand = best
+        align = partial_ratio_alignment(cand, hay)
+        snippet = ""
+        if align is not None and align.dest_end > align.dest_start:
+            if number not in self.spans:
+                from .normalize import normalize_with_spans
+                mapped, spans = normalize_with_spans(raw, **self.options)
+                assert mapped == hay
+                self.spans[number] = spans
+            spans = self.spans[number]
+            start = spans[align.dest_start][0]
+            end = spans[align.dest_end - 1][1]
+            snippet = raw[start:end].strip()
         return MatchResult(
-            row=row, expected=expected_str, status=Status.EXACT,
-            page=exact_page, best_match=expected_str, score=100, diff=[],
+            row=0, expected=expected,
+            status=Status.FUZZY if best_score >= self.threshold else Status.MISSING,
+            page=number, best_match=snippet or None, score=int(round(best_score)),
+            diff=build_diff(needle, normalize(snippet, **self.options)) if snippet else [],
         )
 
-    # Otherwise, if the only match had a duplicated trailing word, surface it as a
-    # difference ("Found with differences") with a diff that highlights the extra word.
-    if dup_page is not None:
-        dup_norm = normalize(dup_snippet, **norm_kwargs)
-        return MatchResult(
-            row=row, expected=expected_str, status=Status.FUZZY,
-            page=dup_page, best_match=dup_snippet or None,
-            score=int(round(fuzz.ratio(needle, dup_norm))),
-            diff=build_diff(needle, dup_norm),
-        )
 
-    score_int = int(round(best_score)) if best_score >= 0 else 0
-    diff = build_diff(needle, normalize(best_snippet, **norm_kwargs)) if best_snippet else []
-
-    if score_int >= fuzzy_threshold:
-        status = Status.FUZZY
-    else:
-        status = Status.MISSING
-
-    return MatchResult(
-        row=row, expected=expected_str, status=status,
-        page=best_page, best_match=best_snippet or None, score=score_int, diff=diff,
-    )
+def match_value(expected: object, pages: dict[int, str], *, fuzzy_threshold: int = 90,
+                normalize_digits: bool = False, strip_punctuation: bool = False,
+                fold_diacritics: bool = False, reverse: bool = False,
+                row: int = 0) -> MatchResult:
+    """Compatibility wrapper for single cells; use PreparedMatcher for a whole run."""
+    return PreparedMatcher(pages, fuzzy_threshold=fuzzy_threshold,
+                           normalize_digits=normalize_digits,
+                           strip_punctuation=strip_punctuation,
+                           fold_diacritics=fold_diacritics, reverse=reverse).match(expected, row=row)

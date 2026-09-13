@@ -1,8 +1,8 @@
 """Optional, deterministic OCR fallback for PDF pages with no text layer.
 
-ProofCheck's defining rule is **100% deterministic, no AI/LLM/ML, offline**. Classic
-Tesseract OCR fits that rule: it is a fixed, offline glyph recogniser, not a learned
-generative model, and the same image rendered the same way always yields the same text.
+Recognition runs locally using Tesseract's trained models. It makes no cloud/LLM
+calls; reproducibility requires fixed engine/language data and settings. OCR may
+misread or omit characters and should be reviewed on difficult artwork.
 
 **Engine (tuned for accuracy + robustness).** Each page is rendered with pypdfium2, then
 OCR is attempted with several deterministic *strategies* and the most confident result is
@@ -37,8 +37,18 @@ pages stay warned + skipped. Install: ``pip install 'proofcheck[ocr]'`` + the en
 from __future__ import annotations
 
 import os
+import time
+from contextlib import closing
+from concurrent.futures import ThreadPoolExecutor, wait
+from .limits import env_int, MAX_IMAGE_PIXELS, MAX_PAGES
+from .pdfium_support import PDFIUM_LOCK
+
+# Limit native Tesseract threads to avoid page-worker x OpenMP oversubscription.
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
+_OCR_PAGE_SECONDS = env_int("PROOFCHECK_OCR_PAGE_SECONDS", 120)
+_OCR_WORKERS = env_int("PROOFCHECK_OCR_WORKERS", 2, 1, 4)
+
 import shutil
-from collections.abc import Callable
 from dataclasses import dataclass
 
 # ---- Optional imports — the feature degrades gracefully when any are absent. -----
@@ -85,7 +95,11 @@ _FALLBACK_TESSERACT_PATHS = (
 
 
 class OcrError(Exception):
-    """Raised for user-facing OCR problems (bad render, engine failure)."""
+    """Raised for OCR problems, optionally retaining already recovered pages."""
+
+    def __init__(self, message: str, *, partial: dict[int, str] | None = None):
+        super().__init__(message)
+        self.partial = partial or {}
 
 
 @dataclass
@@ -224,15 +238,25 @@ def _min_channel(image):
 def _render_page(document, page_index: int, *, dpi: int):
     """Render one PDF page to a PIL image (RGB on white; pdfium has no alpha)."""
     scale = dpi / _PDF_POINTS_PER_INCH
-    return document[page_index].render(scale=scale).to_pil()
+    with PDFIUM_LOCK, closing(document[page_index]) as page:
+        width, height = page.get_size()
+        if width * height * scale * scale > MAX_IMAGE_PIXELS:
+            raise OcrError(f"Rendered page exceeds {MAX_IMAGE_PIXELS} pixels; lower OCR DPI.")
+        with closing(page.render(scale=scale)) as bitmap:
+            # Detach from the native bitmap before releasing the lock/closing it.
+            return bitmap.to_pil().copy()
 
 
 def _load_image_file(path: str):
     """Open an image file as a PIL image, preserving its mode (incl. any alpha channel)."""
     try:
         with _Image.open(path) as im:
+            if getattr(im, "n_frames", 1) > 1:
+                raise OcrError("Multi-frame images are unsupported; export frames as separate images or a PDF.")
+            if im.width * im.height > MAX_IMAGE_PIXELS:
+                raise OcrError(f"Image exceeds {MAX_IMAGE_PIXELS} pixels.")
             im.load()
-            return im.copy()
+            return _ImageOps.exif_transpose(im).copy()
     except Exception as exc:
         raise OcrError(f"Could not open image {os.path.basename(path)}: {exc}") from exc
 
@@ -247,8 +271,16 @@ def ocr_image_file(
     """OCR a single image file (PNG/JPG/TIFF/...). Returns the recovered text."""
     if not available():
         raise OcrError(unavailable_reason() or "OCR is unavailable.")
-    text, _, _, _, _ = _best_ocr(_load_image_file(path), lang=lang, psm=psm, oem=oem)
-    return text or ""
+    try:
+        with _load_image_file(path) as image:
+            text, _, _, _, used = _best_ocr(image, lang=lang, psm=psm, oem=oem)
+            if used is not image:
+                used.close()
+            return text or ""
+    except OcrError:
+        raise
+    except Exception as exc:
+        raise OcrError(f"Image OCR failed: {exc}") from exc
 
 
 def diagnose_image_file(
@@ -341,6 +373,15 @@ def _best_ocr(image, *, lang: str, psm: int, oem: int):
     """
     from pytesseract import Output
 
+    if image.width * image.height > MAX_IMAGE_PIXELS:
+        raise OcrError(f"Image exceeds {MAX_IMAGE_PIXELS} pixels.")
+    # Uniform blank scans need no subprocess or preprocessing at all.
+    gray = _flatten_to_gray(image)
+    lo, hi = gray.getextrema()
+    if lo == hi:
+        return "", 0.0, 0, "blank", gray
+    gray.close()
+    deadline = time.monotonic() + _OCR_PAGE_SECONDS
     psms: list[int] = []
     for p in (psm, *_PSM_FALLBACKS):
         if p not in psms:
@@ -360,7 +401,14 @@ def _best_ocr(image, *, lang: str, psm: int, oem: int):
     for round_index, ps in enumerate(psms):
         for prep_name, prep_img in variants:
             cfg = f"--oem {int(oem)} --psm {int(ps)}"
-            data = _pytesseract.image_to_data(prep_img, lang=lang, config=cfg, output_type=Output.DICT)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise OcrError(f"OCR exceeded {_OCR_PAGE_SECONDS} seconds for one page.")
+            try:
+                data = _pytesseract.image_to_data(prep_img, lang=lang, config=cfg,
+                                                output_type=Output.DICT, timeout=remaining)
+            except RuntimeError as exc:
+                raise OcrError(f"OCR failed or timed out: {exc}") from exc
             text, mean_conf, words, mass = _data_to_result(data)
             cand = (mass, words, text, mean_conf, f"{prep_name}/psm{ps}", prep_img)
             if best is None or (cand[0], cand[1]) > (best[0], best[1]):
@@ -373,6 +421,9 @@ def _best_ocr(image, *, lang: str, psm: int, oem: int):
         if round_index == 0 and best is not None and best[1] >= _ENOUGH_WORDS:
             break  # primary mode already produced substantial text — fallbacks won't help
     _mass, words, text, mean_conf, label, image_used = best
+    for _, variant in variants:
+        if variant is not image_used:
+            variant.close()
     return text, mean_conf, words, label, image_used
 
 
@@ -384,65 +435,71 @@ def ocr_pages(
     lang: str = DEFAULT_LANG,
     psm: int = DEFAULT_PSM,
     oem: int = DEFAULT_OEM,
-    workers: int = 0,
-    progress: Callable[[int, int], None] | None = None,
 ) -> dict[int, str]:
     """Render and OCR the given 1-based ``page_numbers`` of the PDF at ``path``.
 
     Returns ``{page_number: extracted_text}`` using the best of several deterministic OCR
     strategies per page. Raises :class:`OcrError` on any failure.
-
-    ``workers`` controls parallelism (0 = auto, 1 = sequential). Pages are *rendered*
-    sequentially in this thread — a single pdfium document is not safe to render from many
-    threads at once — and then the slow part, Tesseract OCR, runs in parallel. To keep peak
-    memory bounded we render and OCR in chunks of ``workers`` pages rather than rendering every
-    page up front. Per-page results are pure, so output is identical to sequential. ``progress``
-    is an optional ``(done, total)`` observer called as each page is OCR'd (``total`` counts the
-    valid, in-range target pages), so a caller can render OCR progress.
     """
-    from .concurrency import ordered_map, resolve_workers
-
     if not available():
         raise OcrError(unavailable_reason() or "OCR is unavailable.")
 
     out: dict[int, str] = {}
     try:
-        document = _pdfium.PdfDocument(path)
+        with PDFIUM_LOCK:
+            document = _pdfium.PdfDocument(path)
+            page_count = len(document)
+        if page_count > MAX_PAGES:
+            raise OcrError(f"PDF exceeds {MAX_PAGES} pages.")
     except Exception as exc:
+        if "document" in locals():
+            with PDFIUM_LOCK:
+                document.close()
         raise OcrError(f"Could not open PDF for OCR: {exc}") from exc
 
+    def recognize(item):
+        number, image = item
+        try:
+            text, _, _, _, used = _best_ocr(image, lang=lang, psm=psm, oem=oem)
+            if used is not image:
+                used.close()
+            return number, text or ""
+        except Exception as exc:
+            raise OcrError(f"OCR failed on page {number}: {exc}") from exc
+        finally:
+            image.close()
+
+    numbers = sorted(set(n for n in page_numbers if 1 <= n <= page_count))
     try:
-        page_count = len(document)
-        targets = [p for p in page_numbers if 1 <= p <= page_count]
-        total = len(targets)
-        n_workers = resolve_workers(workers, total)
-        done = 0
-
-        def _ocr_rendered(item: tuple[int, object]) -> tuple[int, str]:
-            page_number, image = item
-            try:
-                text, _, _, _, _ = _best_ocr(image, lang=lang, psm=psm, oem=oem)
-            except Exception as exc:
-                raise OcrError(f"OCR failed on page {page_number}: {exc}") from exc
-            return page_number, text or ""
-
-        # Chunk so at most ``n_workers`` rendered page images are held in memory at once.
-        for start in range(0, total, max(1, n_workers)):
-            chunk = targets[start:start + max(1, n_workers)]
-            rendered: list[tuple[int, object]] = []
-            for page_number in chunk:
+        with ThreadPoolExecutor(max_workers=_OCR_WORKERS) as pool:
+            # Only one small batch of rendered images is retained at a time.
+            for offset in range(0, len(numbers), _OCR_WORKERS):
+                batch = []
+                futures = []
                 try:
-                    rendered.append((page_number, _render_page(document, page_number - 1, dpi=dpi)))
-                except Exception as exc:
-                    raise OcrError(f"OCR failed on page {page_number}: {exc}") from exc
-            for page_number, text in ordered_map(_ocr_rendered, rendered, workers=n_workers):
-                out[page_number] = text
-                done += 1
-                if progress:
-                    progress(done, total)
+                    for number in numbers[offset:offset + _OCR_WORKERS]:
+                        batch.append((number, _render_page(document, number - 1, dpi=dpi)))
+                    futures = [pool.submit(recognize, item) for item in batch]
+                    failures = []
+                    for future in futures:
+                        try:
+                            number, text = future.result()
+                            out[number] = text
+                        except OcrError as exc:
+                            failures.append(str(exc))
+                    if failures:
+                        raise OcrError("; ".join(failures), partial=dict(out))
+                finally:
+                    wait(futures)
+                    for _, image in batch:
+                        image.close()
+    except OcrError as exc:
+        if not exc.partial:
+            exc.partial = dict(out)
+        raise
     finally:
-        document.close()
-
+        with PDFIUM_LOCK:
+            document.close()
     return out
 
 
@@ -469,8 +526,10 @@ def diagnose(
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
 
-    document = _pdfium.PdfDocument(path)
+    PDFIUM_LOCK.acquire()
+    document = None
     try:
+        document = _pdfium.PdfDocument(path)
         page_count = len(document)
         for page_number in page_numbers:
             if page_number < 1 or page_number > page_count:
@@ -488,6 +547,8 @@ def diagnose(
                 word_count=words, strategy=label, image_path=image_path,
             ))
     finally:
-        document.close()
+        if document is not None:
+            document.close()
+        PDFIUM_LOCK.release()
 
     return results

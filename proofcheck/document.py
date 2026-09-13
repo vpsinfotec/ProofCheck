@@ -8,13 +8,10 @@ no text layer). Both return the same :class:`~proofcheck.pdf.PdfText`.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import os
 
 from . import images, pdf
 from .pdf import PdfError, PdfText
-
-# OCR progress observer: ``progress(pages_done, pages_total)``. Reported only while OCR runs.
-OcrProgressFn = Callable[[int, int], None]
 
 
 def is_image_input(path: str) -> bool:
@@ -29,20 +26,15 @@ def extract(
     ocr_lang: str = "eng",
     ocr_psm: int = 6,
     use_cache: bool = True,
-    workers: int = 0,
-    progress: OcrProgressFn | None = None,
 ) -> PdfText:
-    """Route to the image OCR path or the PDF path based on ``path``.
-
-    ``workers`` controls extraction/OCR parallelism (0 = auto, 1 = sequential). ``progress`` is
-    an optional ``(done, total)`` observer notified as text-layer and OCR pages complete.
-    """
+    """Route to the image OCR path or the PDF path based on ``path``."""
     if images.is_image_input(path):
         # Images have no text layer, so OCR is implied regardless of the ``ocr`` flag.
-        return images.extract(path, ocr_lang=ocr_lang, ocr_psm=ocr_psm, use_cache=use_cache,
-                              workers=workers, progress=progress)
+        return images.extract(path, ocr_lang=ocr_lang, ocr_psm=ocr_psm, use_cache=use_cache)
+    if os.path.isdir(path):
+        raise PdfError("The directory contains no supported image files.")
     return pdf.extract(path, ocr=ocr, ocr_dpi=ocr_dpi, ocr_lang=ocr_lang, ocr_psm=ocr_psm,
-                       use_cache=use_cache, workers=workers, progress=progress)
+                       use_cache=use_cache)
 
 
 __all__ = ["extract", "is_image_input", "PdfError", "PdfText"]

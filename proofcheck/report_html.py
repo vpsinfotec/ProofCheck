@@ -73,6 +73,7 @@ def render(result: RunResult) -> str:
         ("Not found", s.missing),
         ("Blank", s.skipped),
         ("Match rate", f"{s.pass_rate * 100:.0f}%"),
+        ("Review duplicates", s.duplicate_review),
     ]
     parts: list[str] = [
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>",
@@ -121,6 +122,8 @@ def render(result: RunResult) -> str:
         for r in col.results:
             cls = _STATUS_CLASS[r.status]
             badge = f"<span class='badge {cls}'>{humanize.icon(r.status)} {e(humanize.label(r.status))}</span>"
+            if r.needs_review:
+                badge += " <span class='badge fuzzy'>Review duplicates</span>"
             src = humanize.source_label(r.source)
             src_cell = f"<span class='src src-{'ocr' if r.source == 'OCR' else 'text' if r.source == 'text' else 'none'}'>{e(src)}</span>"
             detail = f"<span class='detail'>{e(humanize.detail(r))}</span>"

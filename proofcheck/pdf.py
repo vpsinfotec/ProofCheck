@@ -1,33 +1,70 @@
-"""PDF text extraction with an optional, deterministic OCR fallback.
+"""PDF text extraction (pdfplumber) with an optional, deterministic OCR fallback.
 
 The primary path pulls each page's embedded text layer — fully deterministic, no
 guessing. Pages with no extractable text (scanned/image-only) are reported so the
 caller can warn and skip them.
 
-**Engine.** Text is extracted with **PDFium** (via ``pypdfium2`` — Google's Chrome PDF
-engine), which is dramatically faster than pdfminer/pdfplumber on image-heavy PDFs: a
-scanned 150-page file whose pages carry only a thin text layer drops from ~7.6 s/page to
-~0.15 s/page (~50x), because PDFium doesn't crawl every embedded image just to recover a
-few characters. ``pdfplumber`` (pdfminer) is kept as an automatic fallback for when PDFium
-isn't importable, and can be forced with ``PROOFCHECK_PDF_ENGINE=pdfplumber``. Both read the
-same embedded text layer, so results are equivalent and deterministic either way.
-
 When ``ocr=True`` those no-text-layer pages are handed to :mod:`proofcheck.ocr`, which
 renders and runs Tesseract over them. OCR is optional and deterministic (same image +
 DPI -> same text); if the OCR libraries/engine are missing the pages stay warned +
-skipped exactly as before. We still never *guess* — OCR only recovers real glyphs.
+skipped with warnings. OCR may misread glyphs; review difficult inputs.
 """
 
 from __future__ import annotations
 
-import os
-from collections.abc import Callable
 from dataclasses import dataclass, field
 
-try:  # PDFium is the fast primary engine; pdfplumber is the fallback below.
+import os
+from contextlib import closing
+import pdfplumber
+
+from .limits import MAX_PAGES, MAX_TEXT_CHARS
+from .pdfium_support import PDFIUM_LOCK
+
+try:
     import pypdfium2 as _pdfium
-except Exception:  # pragma: no cover - exercised only without the optional dep
+except ImportError:
     _pdfium = None
+
+
+def _resolve_engine() -> str:
+    engine = os.environ.get("PROOFCHECK_PDF_ENGINE", "auto").lower()
+    if engine not in {"auto", "pdfium", "pdfplumber"}:
+        raise PdfError("PROOFCHECK_PDF_ENGINE must be auto, pdfium, or pdfplumber.")
+    if engine == "pdfium" and _pdfium is None:
+        raise PdfError("pypdfium2 is not installed.")
+    return ("pdfium" if _pdfium is not None else "pdfplumber") if engine == "auto" else engine
+
+
+def _read_pages(path: str) -> dict[int, str]:
+    pages = {}
+    total = 0
+    def add(number, text):
+        nonlocal total
+        total += len(text)
+        if total > MAX_TEXT_CHARS:
+            raise PdfError(f"Document exceeds {MAX_TEXT_CHARS} extracted characters.")
+        pages[number] = text
+    if _resolve_engine() == "pdfium":
+        with PDFIUM_LOCK, _pdfium.PdfDocument(path) as doc:
+            if not 1 <= len(doc) <= MAX_PAGES:
+                raise PdfError(f"PDF must contain between 1 and {MAX_PAGES} pages.")
+            for i in range(len(doc)):
+                with closing(doc[i]) as page, closing(page.get_textpage()) as textpage:
+                    if textpage.count_chars() + total > MAX_TEXT_CHARS:
+                        raise PdfError(f"Document exceeds {MAX_TEXT_CHARS} extracted characters.")
+                    add(i + 1, textpage.get_text_bounded() or "")
+    else:
+        with pdfplumber.open(path) as doc:
+            if not 1 <= len(doc.pages) <= MAX_PAGES:
+                raise PdfError(f"PDF must contain between 1 and {MAX_PAGES} pages.")
+            for i, page in enumerate(doc.pages, 1):
+                try:
+                    add(i, page.extract_text() or "")
+                finally:
+                    page.close()
+    return pages
+
 
 
 class PdfError(Exception):
@@ -77,65 +114,6 @@ class PdfText:
         return msgs
 
 
-def _normalize_newlines(text: str) -> str:
-    """Fold CRLF/CR to LF so snippets are consistent across engines (PDFium emits CRLF)."""
-    return text.replace("\r\n", "\n").replace("\r", "\n")
-
-
-def _extract_pages_pdfium(
-    path: str, progress: Callable[[int, int], None] | None = None
-) -> dict[int, str]:
-    """Extract the text layer of every page with PDFium. Fast, and robust on image-heavy PDFs."""
-    out: dict[int, str] = {}
-    document = _pdfium.PdfDocument(path)
-    try:
-        total = len(document)
-        for i in range(total):
-            page = document[i]
-            try:
-                textpage = page.get_textpage()
-                try:
-                    text = textpage.get_text_range() or ""
-                finally:
-                    textpage.close()
-            finally:
-                page.close()
-            out[i + 1] = _normalize_newlines(text)
-            if progress:
-                progress(i + 1, total)
-    finally:
-        document.close()
-    return out
-
-
-def _extract_pages_pdfplumber(
-    path: str, progress: Callable[[int, int], None] | None = None
-) -> dict[int, str]:
-    """Extract the text layer of every page with pdfplumber (pdfminer). The fallback engine."""
-    import pdfplumber
-
-    out: dict[int, str] = {}
-    with pdfplumber.open(path) as pdf:
-        pages = pdf.pages
-        total = len(pages)
-        for i, page in enumerate(pages, start=1):
-            out[i] = _normalize_newlines(page.extract_text() or "")
-            if progress:
-                progress(i, total)
-    return out
-
-
-def _resolve_engine() -> str:
-    """Pick the text-extraction engine: PROOFCHECK_PDF_ENGINE override, else auto (PDFium first)."""
-    choice = (os.environ.get("PROOFCHECK_PDF_ENGINE") or "auto").strip().lower()
-    if choice == "pdfplumber":
-        return "pdfplumber"
-    if choice == "pdfium":
-        return "pdfium"
-    # auto: PDFium when available (much faster), otherwise pdfplumber.
-    return "pdfium" if _pdfium is not None else "pdfplumber"
-
-
 def extract(
     path: str,
     *,
@@ -144,51 +122,30 @@ def extract(
     ocr_lang: str = "eng",
     ocr_psm: int = 6,
     use_cache: bool = True,
-    workers: int = 0,
-    progress: Callable[[int, int], None] | None = None,
 ) -> PdfText:
     """Extract text from every page of the PDF at ``path``.
 
-    Uses PDFium by default (fast; see the module docstring) and falls back to pdfplumber when
-    PDFium isn't available or is explicitly disabled via ``PROOFCHECK_PDF_ENGINE=pdfplumber``.
-    With ``ocr=True``, pages that have no embedded text layer are OCR'd as a fallback (when the
-    optional OCR support is installed); otherwise they are reported as empty. ``use_cache=False``
-    forces a fresh OCR even if a cached result exists. ``workers`` controls how many pages are
-    OCR'd in parallel (0 = auto, 1 = sequential). ``progress`` is an optional ``(done, total)``
-    observer notified as text-layer pages and then OCR pages complete.
+    With ``ocr=True``, pages that have no embedded text layer are OCR'd as a fallback
+    (when the optional OCR support is installed); otherwise they are reported as empty.
+    ``use_cache=False`` forces a fresh OCR even if a cached result exists.
     """
-    engine = _resolve_engine()
-    try:
-        if engine == "pdfium":
-            pages = _extract_pages_pdfium(path, progress)
-        else:
-            pages = _extract_pages_pdfplumber(path, progress)
-    except Exception as exc:
-        # If PDFium chokes on an unusual file, retry once with pdfplumber before giving up.
-        if engine == "pdfium":
-            try:
-                pages = _extract_pages_pdfplumber(path, progress)
-            except Exception as fallback_exc:
-                raise PdfError(f"Could not read PDF file: {fallback_exc}") from fallback_exc
-        else:
-            raise PdfError(f"Could not read PDF file: {exc}") from exc
-
     result = PdfText()
-    for i, text in pages.items():
-        result.pages[i] = text
-        if not text.strip():
-            result.empty_pages.append(i)
+    try:
+        result.pages = _read_pages(path)
+        result.empty_pages = [n for n, text in result.pages.items() if not text.strip()]
+    except PdfError:
+        raise
+    except Exception as exc:
+        raise PdfError(f"Could not read PDF file: {exc}") from exc
 
     if ocr and result.empty_pages:
-        _apply_ocr(result, path, dpi=ocr_dpi, lang=ocr_lang, psm=ocr_psm,
-                   use_cache=use_cache, workers=workers, progress=progress)
+        _apply_ocr(result, path, dpi=ocr_dpi, lang=ocr_lang, psm=ocr_psm, use_cache=use_cache)
 
     return result
 
 
 def _apply_ocr(result: PdfText, path: str, *, dpi: int, lang: str, psm: int = 6,
-               use_cache: bool = True, workers: int = 0,
-               progress: Callable[[int, int], None] | None = None) -> None:
+               use_cache: bool = True) -> None:
     """Recover no-text-layer pages via OCR, mutating ``result`` in place.
 
     Uses the content-addressed OCR cache first: an identical file (same bytes, dpi, lang)
@@ -204,24 +161,28 @@ def _apply_ocr(result: PdfText, path: str, *, dpi: int, lang: str, psm: int = 6,
     digest = ocr_cache.file_sha256(path) if use_cache else None
     recovered = ocr_cache.load(digest, dpi=dpi, lang=lang, psm=psm) if use_cache else None
 
+    if recovered is not None and not set(result.empty_pages).issubset(recovered):
+        recovered = None  # Incomplete cache entries cannot suppress retries.
+    succeeded = recovered is not None
     if recovered is not None:
         result.ocr_from_cache = True  # cache hit: unchanged file, skip OCR entirely
-        if progress:
-            # No OCR ran, but the extract stage is done — report it complete so any bar fills.
-            n = len(result.empty_pages)
-            progress(n, n)
     else:
         if not ocr_mod.available():
             result.ocr_unavailable_reason = ocr_mod.unavailable_reason()
             return
         try:
-            recovered = ocr_mod.ocr_pages(path, list(result.empty_pages), dpi=dpi, lang=lang,
-                                          psm=psm, workers=workers, progress=progress)
+            recovered = ocr_mod.ocr_pages(path, list(result.empty_pages), dpi=dpi, lang=lang, psm=psm)
+            succeeded = True
         except ocr_mod.OcrError as exc:
             result.ocr_error = str(exc)
-            return
-        if use_cache and digest is not None:
-            ocr_cache.store(digest, dpi=dpi, lang=lang, pages=recovered, psm=psm)
+            recovered = exc.partial
+            if not recovered:
+                return
+    total = sum(len(recovered.get(n, text)) for n, text in result.pages.items())
+    if total > MAX_TEXT_CHARS:
+        raise PdfError(f"Document exceeds {MAX_TEXT_CHARS} extracted characters after OCR.")
+    if succeeded and not result.ocr_from_cache and use_cache and digest is not None:
+        ocr_cache.store(digest, dpi=dpi, lang=lang, pages=recovered, psm=psm)
 
     still_empty: list[int] = []
     for p in result.empty_pages:

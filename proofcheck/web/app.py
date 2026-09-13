@@ -8,9 +8,18 @@ they are written to per-request tempfiles and deleted immediately after the run.
 
 from __future__ import annotations
 
+import os
 import asyncio
 import json
-import os
+import logging
+import re
+from contextlib import asynccontextmanager, suppress
+from threading import BoundedSemaphore
+
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from fastapi.exceptions import RequestValidationError
+from ..limits import env_int
+
 import tempfile
 import time
 import uuid
@@ -18,16 +27,17 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import __version__, ocr, report_html, report_xlsx
+from .. import __version__, ocr, ocr_cache, report_html, report_xlsx
 from ..models import RunConfig, RunResult
 from ..pipeline import PipelineError, run as pipeline_run
 from . import auth, schemas, store
+from .middleware import ResourceLimitsMiddleware
 
 # ---- Configuration (env-driven, MVP-appropriate defaults) -------------------
-MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "5120"))  # 5 GB default cap
+MAX_UPLOAD_MB = env_int("MAX_UPLOAD_MB", 50, 1, 10240)
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 CORS_ORIGINS = [
     o.strip()
@@ -46,16 +56,41 @@ DOC_EXTS = PDF_EXTS | IMAGE_EXTS  # /api/check accepts a PDF or a single image
 _STATIC_DIR = Path(__file__).parent / "static"
 # Short-lived cache for generated report files, keyed by run_id (download links).
 # NOTE: production should move this to object storage with lifecycle expiry.
-_REPORT_DIR = Path(tempfile.gettempdir()) / "proofcheck_reports"
-_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+_REPORT_DIR = Path(os.environ.get("PROOFCHECK_REPORT_DIR", str(Path(tempfile.gettempdir()) / "proofcheck_reports")))
+_REPORT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    store.init_db()
+    auth.bootstrap_admin()
+    async def cleanup_loop():
+        while True:
+            await asyncio.to_thread(_cleanup_reports)
+            await asyncio.to_thread(ocr_cache.cleanup)
+            await asyncio.sleep(60)
+    cleanup = asyncio.create_task(cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup.cancel()
+        with suppress(asyncio.CancelledError):
+            await cleanup
+
 
 app = FastAPI(
     title="ProofCheck API",
+    lifespan=lifespan,
     version=__version__,
-    description="Deterministic Excel-vs-PDF proof-reading. No AI/LLM/ML. "
+    description="Local Excel-vs-document proof-reading with optional Tesseract OCR. "
     "The JSON contract here is the stable, swappable boundary; the bundled HTML "
     "UI is just one disposable client.",
 )
+
+app.add_middleware(ResourceLimitsMiddleware, upload_limit=lambda: MAX_UPLOAD_BYTES,
+                   max_checks=env_int("PROOFCHECK_MAX_CONCURRENT_CHECKS", 2, 1, 8))
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,13 +99,6 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials=True,  # session cookie is sent on same-origin /api/* calls
 )
-
-# Initialise persistence eagerly so the schema exists regardless of how the app is
-# started (uvicorn, TestClient, embedded). Both calls are cheap and idempotent, and run
-# at import time so they apply even when the ASGI lifespan isn't triggered (bare
-# TestClient). Reload workers re-import the module, so this also covers --reload.
-store.init_db()
-auth.bootstrap_admin()
 
 # Serve the SPA's static assets (app.css / app.js). "/" still returns index.html below.
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -84,7 +112,19 @@ async def _pipeline_error_handler(_: Request, exc: PipelineError) -> JSONRespons
 
 @app.exception_handler(Exception)
 async def _unexpected_error_handler(_: Request, exc: Exception) -> JSONResponse:
-    return JSONResponse(status_code=500, content={"error": f"Unexpected error: {exc}"})
+    logger.error("Unexpected request failure", exc_info=exc)
+    return JSONResponse(status_code=500, content={"error": "The check could not be completed. Please retry or contact the administrator."}, headers={"Cache-Control": "no-store"})
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_error_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail), "detail": exc.detail}, headers=exc.headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = [f"{'.'.join(map(str, error['loc'][1:]))}: {error['msg']}" for error in exc.errors()]
+    return JSONResponse(status_code=422, content={"error": "; ".join(errors)})
 
 
 # ---- Helpers ----------------------------------------------------------------
@@ -109,13 +149,13 @@ def _validate_ext(filename: str, allowed: set[str], kind: str) -> str:
     return ext
 
 
-async def _save_upload(upload: UploadFile, suffix: str) -> str:
+def _save_upload(upload: UploadFile, suffix: str) -> str:
     """Stream an upload to a tempfile, enforcing the size cap; return its path."""
     fd, path = tempfile.mkstemp(suffix=suffix)
     total = 0
     try:
         with os.fdopen(fd, "wb") as out:
-            while chunk := await upload.read(1024 * 1024):
+            while chunk := upload.file.read(1024 * 1024):
                 total += len(chunk)
                 if total > MAX_UPLOAD_BYTES:
                     raise HTTPException(
@@ -123,7 +163,9 @@ async def _save_upload(upload: UploadFile, suffix: str) -> str:
                         detail=f"File too large. Limit is {MAX_UPLOAD_MB} MB.",
                     )
                 out.write(chunk)
-    except Exception:
+            if not total:
+                raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    except BaseException:
         _safe_unlink(path)
         raise
     return path
@@ -154,6 +196,7 @@ def _serialize(result: RunResult, run_id: str) -> dict:
             missing=result.summary.missing,
             skipped=result.summary.skipped,
             pass_rate=result.summary.pass_rate,
+            duplicate_review=result.summary.duplicate_review,
         ),
         columns=[
             schemas.ColumnResultModel(
@@ -168,6 +211,12 @@ def _serialize(result: RunResult, run_id: str) -> dict:
                         score=r.score,
                         diff=[(op, text) for op, text in r.diff],
                         source=r.source,
+                        occurrence_count=r.occurrence_count,
+                        occurrences=[schemas.PageOccurrencesModel(page=o.page, count=o.count)
+                                     for o in r.occurrences],
+                        repeated_words=[schemas.RepeatedWordModel(word=w.word, count=w.count, page=w.page)
+                                        for w in r.repeated_words],
+                        needs_review=r.needs_review,
                     )
                     for r in col.results
                 ],
@@ -175,6 +224,7 @@ def _serialize(result: RunResult, run_id: str) -> dict:
             for col in result.columns
         ],
         warnings=result.warnings,
+        timings={k: round(v, 6) for k, v in result.timings.items()},
         report_urls=schemas.ReportUrls(
             html=f"/reports/{run_id}.html",
             xlsx=f"/reports/{run_id}.xlsx",
@@ -192,6 +242,7 @@ def _summary_dict(result: RunResult) -> dict:
     return {
         "total": s.total, "exact": s.exact, "fuzzy": s.fuzzy,
         "missing": s.missing, "skipped": s.skipped, "pass_rate": s.pass_rate,
+        "duplicate_review": s.duplicate_review,
     }
 
 
@@ -204,7 +255,7 @@ def _meta_dict(result: RunResult) -> dict:
 
 
 def _record_history(run_id: str, user: str, result: RunResult) -> None:
-    """Store non-PII run metadata. Never lets a storage hiccup fail the actual check."""
+    """Persist metadata and report ownership; fail closed if storage is unavailable."""
     try:
         store.add_run(
             run_id=run_id,
@@ -215,8 +266,9 @@ def _record_history(run_id: str, user: str, result: RunResult) -> None:
             summary=_summary_dict(result),
             meta=_meta_dict(result),
         )
-    except Exception:  # pragma: no cover - history is best-effort, never blocks a run
-        pass
+    except Exception:
+        logger.exception("Could not persist report ownership")
+        raise
 
 
 def _history_item(record: store.RunRecord) -> schemas.HistoryItem:
@@ -232,33 +284,36 @@ def _history_item(record: store.RunRecord) -> schemas.HistoryItem:
 
 # ---- Routes -----------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
-async def index() -> HTMLResponse:
+def index() -> HTMLResponse:
     """Serve the bundled disposable UI."""
     index_file = _STATIC_DIR / "index.html"
     return HTMLResponse(index_file.read_text(encoding="utf-8"))
 
 
 @app.get("/api/health", response_model=schemas.HealthResponse)
-async def health() -> schemas.HealthResponse:
+def health() -> schemas.HealthResponse:
     return schemas.HealthResponse(
         status="ok",
         version=__version__,
         auth_enabled=auth.auth_enabled(),
         ocr_available=ocr.available(),
+        max_upload_bytes=MAX_UPLOAD_BYTES,
+        registration_enabled=auth.auth_enabled() and auth.registration_enabled(),
     )
 
 
 @app.post("/api/inspect", response_model=schemas.InspectResponse)
-async def inspect(
+def inspect(
+    header_row: int = Form(1, ge=1, le=1_048_576),
     excel: UploadFile = File(...),  # noqa: A002
     user: str = Depends(auth.current_user),
 ) -> schemas.InspectResponse:
     """Return sheets + headers so the UI can build a column picker."""
     _validate_ext(excel.filename, EXCEL_EXTS, "Excel file")
-    path = await _save_upload(excel, suffix=".xlsx")
+    path = _save_upload(excel, suffix=".xlsx")
     try:
         from .. import excel as excel_mod
-        headers = excel_mod.inspect(path)
+        headers = excel_mod.inspect(path, header_row=header_row)
         return schemas.InspectResponse(sheets=list(headers.keys()), headers=headers)
     except Exception as exc:  # ExcelError and friends -> clean 400
         raise HTTPException(status_code=400, detail=f"Could not inspect Excel file: {exc}")
@@ -267,205 +322,100 @@ async def inspect(
 
 
 @app.post("/api/check")
-async def check(
+def check(
     excel: UploadFile = File(...),  # noqa: A002
     pdf: UploadFile = File(...),
     columns: str = Form(""),
-    all_columns: str = Form("false"),
+    columns_json: str = Form(""),
+    all_columns: bool = Form(False),
     sheet: str = Form(""),
-    header_row: int = Form(1),
-    fuzzy_threshold: int = Form(90),
-    normalize_digits: str = Form("false"),
-    strip_punctuation: str = Form("false"),
-    fold_diacritics: str = Form("false"),
-    reverse: str = Form("false"),
-    ocr: str = Form("false"),  # noqa: A002 - shadows the ocr module locally; resolved below
-    ocr_lang: str = Form("eng"),
-    ocr_dpi: int = Form(300),
-    ocr_psm: int = Form(6),
-    ocr_cache: str = Form("true"),
-    workers: int = Form(0),
+    header_row: int = Form(1, ge=1, le=1_048_576),
+    fuzzy_threshold: int = Form(90, ge=0, le=100),
+    normalize_digits: bool = Form(False),
+    strip_punctuation: bool = Form(False),
+    fold_diacritics: bool = Form(False),
+    reverse: bool = Form(False),
+    ocr: bool = Form(False),  # noqa: A002 - shadows the ocr module locally; resolved below
+    ocr_lang: str = Form("eng", max_length=128, pattern=r"^[A-Za-z0-9_]+(?:[+][A-Za-z0-9_]+)*$"),
+    ocr_dpi: int = Form(300, ge=72, le=600),
+    ocr_psm: int = Form(6, ge=3, le=13),
+    ocr_cache: bool = Form(True),
     user: str = Depends(auth.current_user),
 ) -> JSONResponse:
     """Run a full check and return the documented JSON shape + report download URLs."""
+    started = time.perf_counter()
     _cleanup_reports()
     _validate_ext(excel.filename, EXCEL_EXTS, "Excel file")
     pdf_ext = _validate_ext(pdf.filename, DOC_EXTS, "PDF or image file")
 
-    excel_path = await _save_upload(excel, suffix=".xlsx")
+    excel_path = _save_upload(excel, suffix=".xlsx")
     pdf_path = None
     try:
         # Save with the real extension so the pipeline routes PDFs vs images correctly.
-        pdf_path = await _save_upload(pdf, suffix=pdf_ext)
+        pdf_path = _save_upload(pdf, suffix=pdf_ext)
 
         # Columns arrive as a comma- (or newline-) separated form field.
-        col_list = [c.strip() for c in columns.replace("\n", ",").split(",") if c.strip()]
+        if columns_json:
+            try:
+                col_list = json.loads(columns_json)
+                if not isinstance(col_list, list) or any(not isinstance(c, str) or not c for c in col_list):
+                    raise ValueError()
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(422, "columns_json must be a JSON array of non-empty header names.") from exc
+        else:
+            col_list = [c.strip() for c in columns.replace("\n", ",").split(",") if c.strip()]
         config = RunConfig(
             excel_path=excel_path,
             pdf_path=pdf_path,
             columns=col_list,
-            all_columns=_parse_bool(all_columns),
+            all_columns=all_columns,
             sheet=sheet or None,
             header_row=header_row,
             fuzzy_threshold=fuzzy_threshold,
-            normalize_digits=_parse_bool(normalize_digits),
-            strip_punctuation=_parse_bool(strip_punctuation),
-            fold_diacritics=_parse_bool(fold_diacritics),
-            reverse=_parse_bool(reverse),
-            ocr=_parse_bool(ocr),
+            normalize_digits=normalize_digits,
+            strip_punctuation=strip_punctuation,
+            fold_diacritics=fold_diacritics,
+            reverse=reverse,
+            ocr=ocr,
             ocr_lang=ocr_lang or "eng",
             ocr_dpi=ocr_dpi,
             ocr_psm=ocr_psm,
-            ocr_cache=_parse_bool(ocr_cache),
-            workers=workers,
+            ocr_cache=ocr_cache,
         )
         result = pipeline_run(config)
 
         run_id = uuid.uuid4().hex
         # Original filenames are kept only in meta; the cached files use the opaque run_id.
-        result.meta.excel = excel.filename or result.meta.excel
-        result.meta.pdf = pdf.filename or result.meta.pdf
+        result.meta.excel = Path((excel.filename or result.meta.excel).replace("\\", "/")).name
+        result.meta.pdf = Path((pdf.filename or result.meta.pdf).replace("\\", "/")).name
+        report_start = time.perf_counter()
         report_html.write(result, str(_REPORT_DIR / f"{run_id}.html"))
         report_xlsx.write(result, str(_REPORT_DIR / f"{run_id}.xlsx"))
 
-        # Persist non-PII run metadata so it survives the short-lived report cache.
+        # Persist run metadata and ownership so it survives the short-lived report cache.
         _record_history(run_id, user, result)
 
-        return JSONResponse(content=_serialize(result, run_id))
+        result.timings["reports"] = time.perf_counter() - report_start
+        result.timings["total"] = time.perf_counter() - started
+        return JSONResponse(content=_serialize(result, run_id), headers={"Cache-Control": "no-store"})
+    except BaseException:
+        if "run_id" in locals():
+            for ext in ("html", "xlsx"):
+                _safe_unlink(str(_REPORT_DIR / f"{run_id}.{ext}"))
+        raise
     finally:
         # PII: delete uploads immediately, whether the run succeeded or failed.
         _safe_unlink(excel_path)
         _safe_unlink(pdf_path)
 
 
-def _finalize_run(result: RunResult, user: str, excel_name: str, pdf_name: str) -> dict:
-    """Write reports, persist history, and serialize — shared by /api/check and the stream."""
-    run_id = uuid.uuid4().hex
-    result.meta.excel = excel_name or result.meta.excel
-    result.meta.pdf = pdf_name or result.meta.pdf
-    report_html.write(result, str(_REPORT_DIR / f"{run_id}.html"))
-    report_xlsx.write(result, str(_REPORT_DIR / f"{run_id}.xlsx"))
-    _record_history(run_id, user, result)
-    return _serialize(result, run_id)
-
-
-def _sse(payload: dict) -> str:
-    """Encode one Server-Sent Event frame carrying a JSON object on its ``data:`` line."""
-    return f"data: {json.dumps(payload)}\n\n"
-
-
-@app.post("/api/check/stream")
-async def check_stream(
-    excel: UploadFile = File(...),  # noqa: A002
-    pdf: UploadFile = File(...),
-    columns: str = Form(""),
-    all_columns: str = Form("false"),
-    sheet: str = Form(""),
-    header_row: int = Form(1),
-    fuzzy_threshold: int = Form(90),
-    normalize_digits: str = Form("false"),
-    strip_punctuation: str = Form("false"),
-    fold_diacritics: str = Form("false"),
-    reverse: str = Form("false"),
-    ocr: str = Form("false"),  # noqa: A002
-    ocr_lang: str = Form("eng"),
-    ocr_dpi: int = Form(300),
-    ocr_psm: int = Form(6),
-    ocr_cache: str = Form("true"),
-    workers: int = Form(0),
-    user: str = Depends(auth.current_user),
-) -> StreamingResponse:
-    """Same run as ``/api/check``, but streamed as Server-Sent Events.
-
-    Emits ``{"type":"progress","stage":"extract|match","current":N,"total":M}`` frames as the
-    run advances, then a terminal ``{"type":"result","data":<CheckResponse>}`` (identical shape
-    to ``/api/check``) or ``{"type":"error","error":...}``. The frontend renders a live progress
-    bar from these. Progress is throttled server-side to whole-percent changes per stage so a
-    large spreadsheet doesn't flood the stream.
-    """
-    _cleanup_reports()
-    _validate_ext(excel.filename, EXCEL_EXTS, "Excel file")
-    pdf_ext = _validate_ext(pdf.filename, DOC_EXTS, "PDF or image file")
-
-    excel_path = await _save_upload(excel, suffix=".xlsx")
-    pdf_path = await _save_upload(pdf, suffix=pdf_ext)
-    excel_name, pdf_name = excel.filename, pdf.filename
-
-    col_list = [c.strip() for c in columns.replace("\n", ",").split(",") if c.strip()]
-    config = RunConfig(
-        excel_path=excel_path,
-        pdf_path=pdf_path,
-        columns=col_list,
-        all_columns=_parse_bool(all_columns),
-        sheet=sheet or None,
-        header_row=header_row,
-        fuzzy_threshold=fuzzy_threshold,
-        normalize_digits=_parse_bool(normalize_digits),
-        strip_punctuation=_parse_bool(strip_punctuation),
-        fold_diacritics=_parse_bool(fold_diacritics),
-        reverse=_parse_bool(reverse),
-        ocr=_parse_bool(ocr),
-        ocr_lang=ocr_lang or "eng",
-        ocr_dpi=ocr_dpi,
-        ocr_psm=ocr_psm,
-        ocr_cache=_parse_bool(ocr_cache),
-        workers=workers,
-    )
-
-    async def event_stream():
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue()
-        last = {"stage": None, "pct": -1}
-
-        def on_progress(stage: str, current: int, total: int) -> None:
-            # Called from the worker thread; hop back to the loop and throttle to whole percents.
-            if total <= 0:
-                return
-            pct = int(current * 100 / total)
-            if stage == last["stage"] and pct == last["pct"] and current < total:
-                return
-            last["stage"], last["pct"] = stage, pct
-            loop.call_soon_threadsafe(
-                queue.put_nowait,
-                {"type": "progress", "stage": stage, "current": current, "total": total},
-            )
-
-        def work() -> None:
-            try:
-                result = pipeline_run(config, progress=on_progress)
-                payload = _finalize_run(result, user, excel_name, pdf_name)
-                loop.call_soon_threadsafe(queue.put_nowait, {"type": "result", "data": payload})
-            except PipelineError as exc:
-                loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "error": str(exc)})
-            except Exception as exc:  # noqa: BLE001 - surface as a clean stream error, never a traceback
-                loop.call_soon_threadsafe(
-                    queue.put_nowait, {"type": "error", "error": f"Unexpected error: {exc}"}
-                )
-            finally:
-                # PII: delete uploads as soon as the run is done, success or failure.
-                _safe_unlink(excel_path)
-                _safe_unlink(pdf_path)
-                loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel: stream complete
-
-        worker = loop.run_in_executor(None, work)
-        try:
-            while True:
-                item = await queue.get()
-                if item is None:
-                    break
-                yield _sse(item)
-        finally:
-            await worker
-
-    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"}
-    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
-
-
 @app.get("/reports/{run_id}.{ext}")
-async def download_report(run_id: str, ext: str) -> FileResponse:
+def download_report(run_id: str, ext: str, user: str = Depends(auth.current_user)) -> FileResponse:
     """Download a generated report. run_id is validated to be a bare hex token."""
     _cleanup_reports()
-    if ext not in {"html", "xlsx"} or not run_id.isalnum():
+    if ext not in {"html", "xlsx"} or not re.fullmatch(r"[0-9a-f]{32}", run_id):
+        raise HTTPException(status_code=404, detail="Report not found.")
+    if store.get_run(run_id, user) is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     path = _REPORT_DIR / f"{run_id}.{ext}"
     if not path.exists():
@@ -473,15 +423,16 @@ async def download_report(run_id: str, ext: str) -> FileResponse:
     media = "text/html" if ext == "html" else (
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-    return FileResponse(path, media_type=media, filename=f"proofcheck-{run_id}.{ext}")
+    return FileResponse(path, media_type=media, filename=f"proofcheck-{run_id}.{ext}", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 # ---- Auth routes (optional; no-ops semantically when auth is disabled) -------
-def _set_session_cookie(response: Response, token: str) -> None:
+def _set_session_cookie(response: Response, token: str, request: Request) -> None:
     response.set_cookie(
         key=auth.SESSION_COOKIE,
         value=token,
         httponly=True,
+        secure=auth._truthy(os.environ.get("PROOFCHECK_COOKIE_SECURE")) or request.url.scheme == "https",
         samesite="lax",
         max_age=auth._session_seconds(),
         path="/",
@@ -489,50 +440,52 @@ def _set_session_cookie(response: Response, token: str) -> None:
 
 
 @app.post("/api/auth/login", response_model=schemas.AuthUser)
-async def login(credentials: schemas.Credentials, response: Response) -> schemas.AuthUser:
+def login(credentials: schemas.Credentials, response: Response, request: Request) -> schemas.AuthUser:
     """Validate credentials and set an HttpOnly session cookie."""
     if not auth.auth_enabled():
         # Auth is off: there is nothing to log into; report the single-user identity.
         return schemas.AuthUser(username=auth.ANONYMOUS, authenticated=False)
+    credentials.username = credentials.username.strip()
     if not auth.authenticate(credentials.username, credentials.password):
         raise HTTPException(status_code=401, detail="Invalid username or password.")
-    _set_session_cookie(response, auth.make_token(credentials.username))
+    _set_session_cookie(response, auth.make_token(credentials.username), request)
     return schemas.AuthUser(username=credentials.username, authenticated=True)
 
 
 @app.post("/api/auth/logout")
-async def logout(response: Response) -> dict:
+def logout(response: Response) -> dict:
     response.delete_cookie(auth.SESSION_COOKIE, path="/")
     return {"status": "ok"}
 
 
 @app.get("/api/auth/me", response_model=schemas.AuthUser)
-async def me(user: str = Depends(auth.current_user)) -> schemas.AuthUser:
+def me(user: str = Depends(auth.current_user)) -> schemas.AuthUser:
     """Return the current user (the dependency enforces 401 when auth is on)."""
     return schemas.AuthUser(username=user, authenticated=auth.auth_enabled())
 
 
 @app.post("/api/auth/register", response_model=schemas.AuthUser, status_code=201)
-async def register(credentials: schemas.Credentials, response: Response) -> schemas.AuthUser:
+def register(credentials: schemas.Credentials, response: Response, request: Request) -> schemas.AuthUser:
     """Self-service registration. Disabled unless PROOFCHECK_ALLOW_REGISTER is on."""
     if not auth.auth_enabled() or not auth.registration_enabled():
         raise HTTPException(status_code=403, detail="Registration is disabled.")
+    credentials.username = credentials.username.strip()
     try:
         auth.register_user(credentials.username, credentials.password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    _set_session_cookie(response, auth.make_token(credentials.username))
+    _set_session_cookie(response, auth.make_token(credentials.username), request)
     return schemas.AuthUser(username=credentials.username, authenticated=True)
 
 
 # ---- Run history routes (persisted metadata; PII inputs are never stored) ----
 @app.get("/api/history", response_model=schemas.HistoryList)
-async def history(user: str = Depends(auth.current_user)) -> schemas.HistoryList:
+def history(user: str = Depends(auth.current_user)) -> schemas.HistoryList:
     return schemas.HistoryList(runs=[_history_item(r) for r in store.list_runs(user)])
 
 
 @app.get("/api/history/{run_id}", response_model=schemas.HistoryItem)
-async def history_item(run_id: str, user: str = Depends(auth.current_user)) -> schemas.HistoryItem:
+def history_item(run_id: str, user: str = Depends(auth.current_user)) -> schemas.HistoryItem:
     if not run_id.isalnum():
         raise HTTPException(status_code=404, detail="Run not found.")
     record = store.get_run(run_id, user)
@@ -542,7 +495,7 @@ async def history_item(run_id: str, user: str = Depends(auth.current_user)) -> s
 
 
 @app.delete("/api/history/{run_id}")
-async def delete_history_item(run_id: str, user: str = Depends(auth.current_user)) -> dict:
+def delete_history_item(run_id: str, user: str = Depends(auth.current_user)) -> dict:
     if not run_id.isalnum() or not store.delete_run(run_id, user):
         raise HTTPException(status_code=404, detail="Run not found.")
     # Best-effort: also drop any cached report files for this run.

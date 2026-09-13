@@ -9,12 +9,11 @@ door open for a future background-job runner (arq/RQ) to call it unchanged.
 from __future__ import annotations
 
 import os
-import threading
-from collections.abc import Callable
+import re
+from time import perf_counter
 
 from . import document, excel, pdf
-from .concurrency import ordered_map, resolve_workers
-from .matcher import match_value, normalize_pages
+from .matcher import PreparedMatcher
 from .models import (
     ColumnResult,
     Meta,
@@ -23,13 +22,6 @@ from .models import (
     Status,
     Summary,
 )
-
-# Progress callback: ``progress(stage, current, total)`` where ``stage`` is "extract"
-# (reading the PDF text layer + any OCR of no-text-layer pages) or "match" (checking values),
-# and ``current``/``total`` are unit counts. It is called with ``current == total`` when a
-# stage finishes, so a renderer can show a definite 100%/done state. Purely observational — it
-# never affects the result, so a run with no callback behaves exactly as before.
-ProgressFn = Callable[[str, int, int], None]
 
 
 class PipelineError(Exception):
@@ -41,6 +33,7 @@ def _summarize(columns: list[ColumnResult]) -> Summary:
     for col in columns:
         for r in col.results:
             summary.total += 1
+            summary.duplicate_review += int(r.needs_review)
             if r.status is Status.EXACT:
                 summary.exact += 1
             elif r.status is Status.FUZZY:
@@ -54,16 +47,22 @@ def _summarize(columns: list[ColumnResult]) -> Summary:
     return summary
 
 
-def run(config: RunConfig, *, progress: ProgressFn | None = None) -> RunResult:
-    """Execute one check run and return a fully-assembled :class:`RunResult`.
-
-    ``progress`` is an optional observer (see :data:`ProgressFn`) notified as the extraction
-    and matching stages advance, so a caller (e.g. the CLI or the web stream) can render a
-    progress bar. It has no effect on the result.
-    """
+def run(config: RunConfig) -> RunResult:
+    """Execute one check run and return a fully-assembled :class:`RunResult`."""
     if not config.all_columns and not config.columns:
         raise PipelineError("No columns selected. Pass column names or enable all-columns.")
 
+    if not 1 <= config.header_row <= 1_048_576:
+        raise PipelineError("Header row must be between 1 and 1048576.")
+    if not 0 <= config.fuzzy_threshold <= 100:
+        raise PipelineError("Fuzzy threshold must be between 0 and 100.")
+    if not 72 <= config.ocr_dpi <= 600:
+        raise PipelineError("OCR DPI must be between 72 and 600.")
+    if config.ocr_psm not in {3, 4, 6, 7, 8, 11, 12, 13}:
+        raise PipelineError("Unsupported OCR page layout (PSM).")
+    if not re.fullmatch(r"[A-Za-z0-9_]+(?:[+][A-Za-z0-9_]+)*", config.ocr_lang):
+        raise PipelineError("Invalid OCR language; use installed pack names such as eng+ara.")
+    started = perf_counter()
     # 1. Load the requested Excel columns.
     try:
         column_data = excel.load_columns(
@@ -79,11 +78,10 @@ def run(config: RunConfig, *, progress: ProgressFn | None = None) -> RunResult:
     if not column_data:
         raise PipelineError("No columns to check were found on the sheet.")
 
+    if not any(cd.cells for cd in column_data):
+        raise PipelineError("The selected sheet has no data rows below the header.")
+    loaded = perf_counter()
     # 2. Extract page text from the input (PDF text layer, or OCR for image input).
-    # Extraction (text layer + any OCR) is the slow stage on large/scanned PDFs, so it reports
-    # per-page progress under the "extract" stage; OCR of no-text-layer pages fans out over
-    # ``config.workers``.
-    ocr_progress = (lambda done, total: progress("extract", done, total)) if progress else None
     try:
         pdf_text = document.extract(
             config.pdf_path,
@@ -92,70 +90,29 @@ def run(config: RunConfig, *, progress: ProgressFn | None = None) -> RunResult:
             ocr_lang=config.ocr_lang,
             ocr_psm=config.ocr_psm,
             use_cache=config.ocr_cache,
-            workers=config.workers,
-            progress=ocr_progress,
         )
     except pdf.PdfError as exc:
         raise PipelineError(str(exc)) from exc
 
     # 3. Match every value in every selected column.
-    ocr_page_set = set(pdf_text.ocr_pages)
-
-    # Normalize each page's text ONCE for the whole run. The normalization depends only on
-    # the run-wide flags, so it is identical for every value; doing it here instead of inside
-    # match_value turns an O(values x pages) pass over the full PDF text into an O(pages) one.
-    pages_norm = normalize_pages(
-        pdf_text.pages,
-        normalize_digits=config.normalize_digits,
-        strip_punctuation=config.strip_punctuation,
-        fold_diacritics=config.fold_diacritics,
+    # Pages recovered via OCR, so each match can report whether it came from the embedded
+    # text layer or from OCR.
+    extracted = perf_counter()
+    matcher = PreparedMatcher(
+        pdf_text.pages, fuzzy_threshold=config.fuzzy_threshold,
+        normalize_digits=config.normalize_digits, strip_punctuation=config.strip_punctuation,
+        fold_diacritics=config.fold_diacritics, reverse=config.reverse,
     )
-
-    # Flatten to (column_index, row, value) tasks so results can be reassembled by position.
-    # Every value is an independent, pure match against the same pages, so the work fans out
-    # over a thread pool (rapidfuzz releases the GIL) and is reassembled in the original
-    # column/row order — output is identical regardless of ``config.workers``.
-    tasks = [
-        (col_idx, row_num, value)
-        for col_idx, cd in enumerate(column_data)
-        for row_num, value in cd.cells
-    ]
-    total_values = len(tasks)
-    if progress:
-        progress("match", 0, total_values)  # announce the stage even before the first result
-
-    # A lock-guarded counter so progress still advances monotonically (1, 2, ... total) even
-    # when matches complete out of order across worker threads.
-    matched = 0
-    progress_lock = threading.Lock()
-
-    def _match_task(task: tuple[int, int, object]):
-        nonlocal matched
-        col_idx, row_num, value = task
-        mr = match_value(
-            value,
-            pdf_text.pages,
-            fuzzy_threshold=config.fuzzy_threshold,
-            normalize_digits=config.normalize_digits,
-            strip_punctuation=config.strip_punctuation,
-            fold_diacritics=config.fold_diacritics,
-            reverse=config.reverse,
-            row=row_num,
-            pages_norm=pages_norm,
-        )
-        if mr.page is not None:
-            mr.source = "OCR" if mr.page in ocr_page_set else "text"
-        if progress:
-            with progress_lock:
-                matched += 1
-                done = matched
-            progress("match", done, total_values)
-        return col_idx, mr
-
-    workers = resolve_workers(config.workers, total_values)
-    columns = [ColumnResult(name=cd.name) for cd in column_data]
-    for col_idx, mr in ordered_map(_match_task, tasks, workers=workers):
-        columns[col_idx].results.append(mr)
+    ocr_page_set = set(pdf_text.ocr_pages)
+    columns: list[ColumnResult] = []
+    for cd in column_data:
+        col_result = ColumnResult(name=cd.name)
+        for row_num, value in cd.cells:
+            mr = matcher.match(value, row=row_num)
+            if mr.page is not None:
+                mr.source = "OCR" if mr.page in ocr_page_set else "text"
+            col_result.results.append(mr)
+        columns.append(col_result)
 
     # 4. Assemble the result.
     summary = _summarize(columns)
@@ -170,7 +127,7 @@ def run(config: RunConfig, *, progress: ProgressFn | None = None) -> RunResult:
             "fold_diacritics": config.fold_diacritics,
             "reverse": config.reverse,
             "all_columns": config.all_columns,
-            "ocr": config.ocr,
+            "ocr": config.ocr or document.is_image_input(config.pdf_path),
             "ocr_cache": config.ocr_cache,
         },
     )
@@ -179,4 +136,6 @@ def run(config: RunConfig, *, progress: ProgressFn | None = None) -> RunResult:
         summary=summary,
         columns=columns,
         warnings=pdf_text.warnings(),
+        timings={"load_excel": loaded - started, "extract_document": extracted - loaded,
+                 "match": perf_counter() - extracted, "pipeline": perf_counter() - started},
     )

@@ -22,7 +22,12 @@ const el = (tag, attrs = {}, ...kids) => {
 };
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const view = () => document.getElementById("view");
-const clearView = () => { view().innerHTML = ""; };
+const clearView = () => {
+  if (state.viewCleanup) state.viewCleanup();
+  state.viewCleanup = null;
+  state.viewToken++;
+  view().replaceChildren();
+};
 
 // ---- file intake (drag & drop + clipboard paste) ----------------------------
 // Both slots accept files by drop/paste, not just the native picker. Files are routed
@@ -56,7 +61,7 @@ function withName(file) {
 // Assign a File to a native <input type=file> and fire change so existing handlers run.
 function setInputFile(inputId, file) {
   const input = document.getElementById(inputId);
-  if (!input) return false;
+  if (!input || input.disabled) return false;
   try { const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files; }
   catch (_) { return false; }
   input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -66,9 +71,10 @@ function setInputFile(inputId, file) {
 // Route every usable file in a list to its slot; returns how many were accepted.
 function acceptFiles(fileList) {
   let handled = 0;
+  const accepted = new Set();
   for (const raw of Array.from(fileList || [])) {
     const target = targetForFile(raw);
-    if (target && setInputFile(target, withName(raw))) handled++;
+    if (target && !accepted.has(target) && setInputFile(target, withName(raw))) { handled++; accepted.add(target); }
   }
   return handled;
 }
@@ -97,22 +103,46 @@ function diffHtml(diff, best) {
 }
 
 // ---- api client -------------------------------------------------------------
+function errorMessage(data, fallback) {
+  if (typeof data?.error === "string") return data.error;
+  if (typeof data?.detail === "string") return data.detail;
+  if (Array.isArray(data?.detail)) return data.detail.map((e) => `${(e.loc || []).slice(1).join(".")}: ${e.msg}`).join("; ");
+  return fallback || "The server returned an unexpected response.";
+}
+
 const api = {
-  async json(method, url, body) {
-    const opts = { method, credentials: "same-origin", headers: {} };
-    if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
-    const res = await fetch(url, opts);
-    let data = null;
-    try { data = await res.json(); } catch (_) { /* empty body */ }
-    if (!res.ok) { const e = new Error((data && (data.error || data.detail)) || res.statusText); e.status = res.status; throw e; }
-    return data;
+  async request(url, opts = {}, { signal, timeout = 30000 } = {}) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    let timedOut = false;
+    const timer = timeout ? setTimeout(() => { timedOut = true; controller.abort(); }, timeout) : null;
+    try {
+      const res = await fetch(url, { ...opts, credentials: "same-origin", signal: controller.signal });
+      let data;
+      try { data = await res.json(); }
+      catch (_) { throw new Error(res.ok ? "The server returned an unreadable response." : `Server error (${res.status}). Please retry.`); }
+      if (!res.ok) {
+        const e = new Error(errorMessage(data, res.statusText)); e.status = res.status; throw e;
+      }
+      return data;
+    } catch (e) {
+      if (timedOut) throw new Error("The request timed out. Check your connection and retry.");
+      if (e instanceof TypeError) throw new Error("Cannot reach the server. Check your connection and retry.");
+      throw e;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+    }
   },
-  async form(url, formData) {
-    const res = await fetch(url, { method: "POST", body: formData, credentials: "same-origin" });
-    let data = null;
-    try { data = await res.json(); } catch (_) { /* empty */ }
-    if (!res.ok) { const e = new Error((data && (data.error || data.detail)) || res.statusText); e.status = res.status; throw e; }
-    return data;
+  json(method, url, body) {
+    const opts = { method, headers: {} };
+    if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+    return api.request(url, opts);
+  },
+  form(url, formData, options) {
+    return api.request(url, { method: "POST", body: formData }, options);
   },
   health: () => api.json("GET", "/api/health"),
   me: () => api.json("GET", "/api/auth/me"),
@@ -123,65 +153,11 @@ const api = {
   deleteHistory: (id) => api.json("DELETE", `/api/history/${id}`),
 };
 
-// Stream a check as Server-Sent Events, invoking onEvent for each parsed frame
-// ({type:"progress"|"result"|"error", ...}). Falls back to throwing on a non-OK response
-// so the caller can show the same error banner as the plain /api/check path.
-async function streamCheck(formData, onEvent) {
-  const res = await fetch("/api/check/stream", {
-    method: "POST", body: formData, credentials: "same-origin",
-  });
-  if (!res.ok || !res.body) {
-    let data = null;
-    try { data = await res.json(); } catch (_) { /* empty */ }
-    const e = new Error((data && (data.error || data.detail)) || res.statusText);
-    e.status = res.status;
-    throw e;
-  }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    // SSE frames are separated by a blank line; each frame's payload is its `data:` line.
-    let sep;
-    while ((sep = buf.indexOf("\n\n")) >= 0) {
-      const frame = buf.slice(0, sep);
-      buf = buf.slice(sep + 2);
-      const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
-      if (!dataLine) continue;
-      let evt;
-      try { evt = JSON.parse(dataLine.slice(5).trim()); } catch (_) { continue; }
-      onEvent(evt);
-    }
-  }
-}
-
-// A small progress bar with a per-stage label and a definite completion tick.
-function progressUI() {
-  const LABELS = { extract: "Reading the PDF", match: "Checking values" };
-  const label = el("div", { class: "pbar-label" }, "Starting…");
-  const fill = el("div", { class: "pbar-fill" });
-  const track = el("div", { class: "pbar-track" }, fill);
-  const node = el("div", { class: "pbar" }, label, track);
-  return {
-    node,
-    update(stage, current, total) {
-      const pct = total > 0 ? Math.floor((current * 100) / total) : 0;
-      fill.style.width = pct + "%";
-      const name = LABELS[stage] || stage;
-      const doneTick = current >= total && total > 0 ? " ✓" : "";
-      label.textContent = `${name}: ${current} / ${total} (${pct}%)${doneTick}`;
-    },
-    remove() { node.remove(); },
-  };
-}
-
 // ---- app state --------------------------------------------------------------
-const state = { health: null, user: null, inspectData: null, lastResult: null };
+const state = { health: null, user: null, inspectData: null, lastResult: null,
+  viewToken: 0, viewCleanup: null, running: false, runStarted: 0, runError: null, page: 0, rows: [] };
 
-function banner(kind, msg) { return el("div", { class: `banner ${kind}`, html: msg }); }
+function banner(kind, msg) { return el("div", { class: `banner ${kind}`, role: kind === "err" ? "alert" : "status", html: msg }); }
 
 // ---- Check view -------------------------------------------------------------
 function checkView() {
@@ -202,6 +178,8 @@ function checkView() {
         <b>copy a file/screenshot and paste</b> (Ctrl/Cmd + V). Spreadsheets go to the Excel slot;
         PDFs and images to the document slot.</p>
       <div class="row">
+        <div class="field" style="max-width:160px;"><label for="header_row">Header row</label>
+          <input id="header_row" type="number" min="1" max="1048576" value="1"></div>
         <div class="field" style="max-width:240px;"><label for="sheet">Sheet</label>
           <select id="sheet"></select></div>
         <div class="field"><label for="columns">Columns to check (one or more)</label>
@@ -225,7 +203,7 @@ function checkView() {
         <div class="field" style="max-width:160px;"><label for="ocr_lang">OCR language(s)</label>
           <input type="text" id="ocr_lang" value="eng" placeholder="eng+ara"></div>
         <div class="field" style="max-width:140px;"><label for="ocr_dpi">OCR DPI</label>
-          <input type="number" id="ocr_dpi" value="300" min="72" max="1200" step="50"></div>
+          <input type="number" id="ocr_dpi" value="300" min="72" max="600" step="1"></div>
         <div class="field" style="max-width:220px;"><label for="ocr_psm">Page layout (PSM)</label>
           <select id="ocr_psm">
             <option value="6" selected>Single block (6)</option>
@@ -236,15 +214,17 @@ function checkView() {
       </div>
       <div style="margin-top:1rem;">
         <button class="primary" id="run" disabled>Run check</button>
-        <span id="hint" class="muted">Select an Excel and a PDF file to begin.</span>
+        <span id="hint" class="muted" role="status" aria-live="polite">Select an Excel and a document to begin.</span>
       </div>`}),
-    el("div", { id: "msgs" }),
+    el("div", { id: "msgs", "aria-live": "polite" }),
     el("div", { id: "results", class: "hidden" })
   );
   view().appendChild(root);
   wireCheck();
   applyOcrStatus();          // reflect current (cached) health immediately
   refreshHealthThenApply();  // then re-check the server in case it was just (re)started
+  if (state.lastResult) renderResults(state.lastResult);
+  if (state.runError) document.getElementById("msgs").appendChild(banner("err", esc(state.runError)));
 }
 
 // Update the OCR pill + checkbox from state.health. When OCR isn't available the checkbox
@@ -261,7 +241,7 @@ function applyOcrStatus() {
   pill.style.color = ready ? "var(--exact)" : "var(--missing)";
   const box = document.getElementById("ocr");
   if (box) {
-    box.disabled = !ready;
+    box.disabled = state.running || !ready;
     if (!ready && box.checked) {
       box.checked = false;
       document.getElementById("ocrOpts").classList.add("hidden");
@@ -275,128 +255,140 @@ async function refreshHealthThenApply() {
 }
 
 function wireCheck() {
-  const $ = (id) => document.getElementById(id);
-  const updateRun = () => { $("run").disabled = !($("excel").files.length && $("pdf").files.length); };
-
+  const panel = document.getElementById("checkPanel");
+  const root = panel.parentElement;
+  const $ = (id) => root.querySelector(`#${id}`);
+  let inspecting = false, inspected = false, inspectSequence = 0, inspectController;
+  let elapsedTimer = null;
+  const showElapsed = () => {
+    if (!root.isConnected) return;
+    const seconds = Math.floor((Date.now() - state.runStarted) / 1000);
+    $("hint").textContent = `Processing… ${seconds}s elapsed. Scanned pages may take longer.`;
+  };
+  state.viewCleanup = () => { inspectController?.abort(); clearInterval(elapsedTimer); };
+  const updateRun = () => {
+    if (!root.isConnected) return;
+    const filesReady = $("excel").files.length && $("pdf").files.length;
+    const selected = $("all_columns").checked || $("columns").selectedOptions.length;
+    $("run").disabled = state.running || inspecting || !inspected || !filesReady || !selected;
+    if (state.running) return showElapsed();
+    $("hint").textContent = inspecting ? "Reading spreadsheet headers…" : !filesReady
+      ? "Choose an Excel file and a PDF or image."
+      : !inspected ? "Read the spreadsheet headers to continue."
+      : !selected ? "Select columns or enable Check all columns." : "Ready to check.";
+  };
+  const fileValid = (input, allowed) => {
+    const file = input.files[0];
+    if (!file) return false;
+    const limit = state.health?.max_upload_bytes || 50 * 1024 * 1024;
+    let message = "";
+    if (!allowed.has(extOf(file.name))) message = "Unsupported file type. Choose a file in one of the listed formats.";
+    else if (!file.size) message = "This file is empty. Choose a file with content.";
+    else if (file.size > limit) message = `File exceeds the ${(limit / 1024 / 1024).toFixed(0)} MB limit.`;
+    if (message) { input.value = ""; $("msgs").appendChild(banner("err", message)); return false; }
+    return true;
+  };
   $("threshold").addEventListener("input", () => { $("thresholdVal").textContent = $("threshold").value; });
-  $("pdf").addEventListener("change", updateRun);
+  $("pdf").addEventListener("change", () => { fileValid($("pdf"), DOC_EXTS); updateRun(); });
+  $("columns").addEventListener("change", updateRun);
+  $("all_columns").addEventListener("change", updateRun);
   $("ocr").addEventListener("change", () => $("ocrOpts").classList.toggle("hidden", !$("ocr").checked));
 
-  // Re-selecting the SAME filename normally does NOT fire `change`, so editing a file and
-  // re-uploading it wouldn't update the UI (you'd have to refresh the page). Clearing the
-  // input's value when the picker opens guarantees `change` fires every time — even for the
-  // same path — so the freshly-saved file content is always what gets read and sent.
-  ["excel", "pdf"].forEach((id) => $(id).addEventListener("click", () => { $(id).value = ""; }));
-
-  // Drag & drop: dropping files anywhere on the panel routes each to its slot. The panel
-  // is recreated on every checkView(), so these listeners die with it — no leak.
-  const zone = $("checkPanel");
-  if (zone) {
-    const isFileDrag = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
-    ["dragenter", "dragover"].forEach((evt) => zone.addEventListener(evt, (e) => {
-      if (!isFileDrag(e)) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "copy";
-      zone.classList.add("dragging");
-    }));
-    zone.addEventListener("dragleave", (e) => { if (!zone.contains(e.relatedTarget)) zone.classList.remove("dragging"); });
-    zone.addEventListener("drop", (e) => {
-      if (!(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length)) return;
-      e.preventDefault();
-      zone.classList.remove("dragging");
-      $("msgs").innerHTML = "";
-      if (!acceptFiles(e.dataTransfer.files)) {
-        $("msgs").appendChild(banner("err", "Couldn't use the dropped file(s). Drop an Excel (.xlsx/.xlsm) or a PDF/image."));
-      }
-    });
-  }
-
-  $("excel").addEventListener("change", async () => {
-    updateRun();
-    if (!$("excel").files.length) return;
-    $("msgs").innerHTML = "";
-    const fd = new FormData(); fd.append("excel", $("excel").files[0]);
-    try {
-      state.inspectData = await api.form("/api/inspect", fd);
-      populatePickers(state.inspectData);
-    } catch (e) {
-      if (e.status === 401) return redirectLogin();
-      $("msgs").appendChild(banner("err", "Inspect failed: " + esc(e.message)));
-    }
+  // Keep the previous selection when a native file picker is cancelled.
+  ["excel", "pdf"].forEach((id) => $(id).addEventListener("cancel", updateRun));
+  const isFileDrag = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+  ["dragenter", "dragover"].forEach((evt) => panel.addEventListener(evt, (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = state.running ? "none" : "copy";
+    if (!state.running) panel.classList.add("dragging");
+  }));
+  panel.addEventListener("dragleave", (e) => { if (!panel.contains(e.relatedTarget)) panel.classList.remove("dragging"); });
+  panel.addEventListener("drop", (e) => {
+    if (!e.dataTransfer?.files?.length) return;
+    e.preventDefault(); panel.classList.remove("dragging");
+    if (state.running) return;
+    $("msgs").replaceChildren();
+    if (!acceptFiles(e.dataTransfer.files)) $("msgs").appendChild(banner("err", "Choose an Excel file or a PDF/image."));
   });
 
-  $("run").addEventListener("click", runCheck);
-
-  function populatePickers(data) {
-    const sheetSel = $("sheet"); sheetSel.innerHTML = "";
-    data.sheets.forEach((s) => sheetSel.appendChild(el("option", { value: s }, s)));
-    const fill = () => {
-      const colSel = $("columns");
-      // Preserve the user's column picks across a re-inspect (e.g. after re-uploading an
-      // edited file), so they don't have to reselect columns every time.
-      const previously = new Set(Array.from(colSel.selectedOptions).map((o) => o.value));
-      const cols = (data.headers[sheetSel.value] || []).filter(Boolean);
-      colSel.innerHTML = "";
-      cols.forEach((c) => {
-        const o = el("option", { value: c }, c);
-        if (previously.has(c)) o.selected = true;
-        colSel.appendChild(o);
-      });
-    };
-    sheetSel.onchange = fill; fill();
-  }
-
-  async function runCheck() {
-    $("msgs").innerHTML = "";
-    // Clearing inputs on click (above) can leave one empty if a picker was cancelled.
-    if (!$("excel").files.length || !$("pdf").files.length) {
-      $("msgs").appendChild(banner("err", "Please choose both an Excel and a PDF file."));
-      updateRun();
-      return;
-    }
-    const fd = new FormData();
-    fd.append("excel", $("excel").files[0]);
-    fd.append("pdf", $("pdf").files[0]);
-    fd.append("columns", Array.from($("columns").selectedOptions).map((o) => o.value).join(","));
-    fd.append("all_columns", $("all_columns").checked);
-    fd.append("sheet", $("sheet").value);
-    fd.append("header_row", "1");
-    fd.append("fuzzy_threshold", $("threshold").value);
-    fd.append("normalize_digits", $("normalize_digits").checked);
-    fd.append("strip_punctuation", $("strip_punctuation").checked);
-    fd.append("fold_diacritics", $("fold_diacritics").checked);
-    fd.append("reverse", $("reverse").checked);
-    fd.append("ocr", $("ocr").checked);
-    fd.append("ocr_lang", $("ocr_lang").value || "eng");
-    fd.append("ocr_dpi", $("ocr_dpi").value || "300");
-    fd.append("ocr_psm", $("ocr_psm").value || "6");
-    fd.append("ocr_cache", $("ocr_cache").checked);
-
-    const btn = $("run");
-    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Running…';
-    const prog = progressUI();
-    $("msgs").innerHTML = "";
-    $("msgs").appendChild(prog.node);
+  const inspectFile = async () => {
+    const sequence = ++inspectSequence;
+    inspectController?.abort(); inspectController = new AbortController();
+    const previousSheet = $("sheet").value;
+    const previousColumns = new Set(Array.from($("columns").selectedOptions, (o) => o.value));
+    inspected = false; state.inspectData = null;
+    $("sheet").replaceChildren(); $("columns").replaceChildren(); $("msgs").replaceChildren();
+    if (!fileValid($("excel"), EXCEL_EXTS) || !$("header_row").reportValidity()) { inspecting = false; updateRun(); return; }
+    inspecting = true; updateRun();
+    const fd = new FormData(); fd.append("excel", $("excel").files[0]); fd.append("header_row", $("header_row").value);
     try {
-      let result = null;
-      let streamError = null;
-      await streamCheck(fd, (evt) => {
-        if (evt.type === "progress") prog.update(evt.stage, evt.current, evt.total);
-        else if (evt.type === "result") result = evt.data;
-        else if (evt.type === "error") streamError = evt.error;
-      });
-      prog.remove();
-      if (streamError) throw new Error(streamError);
-      if (!result) throw new Error("Stream ended without a result.");
-      state.lastResult = result; renderResults(result);
+      const data = await api.form("/api/inspect", fd, { signal: inspectController.signal });
+      if (sequence !== inspectSequence || !root.isConnected) return;
+      state.inspectData = data;
+      data.sheets.forEach((name) => $("sheet").appendChild(el("option", { value: name }, name)));
+      if (data.sheets.includes(previousSheet)) $("sheet").value = previousSheet;
+      const fill = () => {
+        $("columns").replaceChildren();
+        const names = (data.headers[$("sheet").value] || []).filter(Boolean);
+        if (new Set(names).size !== names.length) {
+          inspected = false; $("msgs").replaceChildren(banner("err", "Duplicate column headers found. Rename them in the workbook before checking."));
+        } else {
+          inspected = names.length > 0;
+          names.forEach((name) => { const option = el("option", { value: name }, name); option.selected = previousColumns.has(name); $("columns").appendChild(option); });
+        }
+        updateRun();
+      };
+      $("sheet").onchange = fill; fill();
     } catch (e) {
-      prog.remove();
+      if (sequence !== inspectSequence || !root.isConnected || e.name === "AbortError") return;
       if (e.status === 401) return redirectLogin();
-      $("msgs").appendChild(banner("err", "Check failed: " + esc(e.message)));
+      $("msgs").appendChild(banner("err", "Inspect failed: " + esc(e.message)));
     } finally {
-      btn.disabled = false; btn.textContent = "Run check"; updateRun();
+      if (sequence === inspectSequence && root.isConnected) { inspecting = false; updateRun(); }
     }
-  }
+  };
+  $("excel").addEventListener("change", inspectFile);
+  $("header_row").addEventListener("change", inspectFile);
+
+  $("run").addEventListener("click", async () => {
+    if (state.running || $("run").disabled) return;
+    if (!fileValid($("excel"), EXCEL_EXTS) || !fileValid($("pdf"), DOC_EXTS)) { updateRun(); return; }
+    if (!$("header_row").reportValidity() || !$("ocr_dpi").reportValidity()) return;
+    $("msgs").replaceChildren(); $("results").replaceChildren(); $("results").classList.add("hidden");
+    state.lastResult = null; state.runError = null;
+    const fd = new FormData();
+    fd.append("excel", $("excel").files[0]); fd.append("pdf", $("pdf").files[0]);
+    fd.append("columns_json", JSON.stringify(Array.from($("columns").selectedOptions, (o) => o.value)));
+    fd.append("sheet", $("sheet").value); fd.append("header_row", $("header_row").value);
+    fd.append("fuzzy_threshold", $("threshold").value);
+    ["normalize_digits", "strip_punctuation", "fold_diacritics", "reverse", "all_columns", "ocr", "ocr_cache"].forEach((id) => fd.append(id, $(id).checked));
+    ["ocr_lang", "ocr_dpi", "ocr_psm"].forEach((id) => fd.append(id, $(id).value));
+    state.running = true; state.runStarted = Date.now(); refreshUserBox();
+    panel.querySelectorAll("input,select,button").forEach((node) => { node.disabled = true; });
+    panel.setAttribute("aria-busy", "true");
+    $("run").textContent = "Running…"; showElapsed(); elapsedTimer = setInterval(showElapsed, 1000);
+    try {
+      // No automatic retry: replaying a POST would create a duplicate check.
+      state.lastResult = await api.form("/api/check", fd, { timeout: 0 });
+      if (root.isConnected) renderResults(state.lastResult);
+    } catch (e) {
+      state.runError = "Check failed: " + e.message;
+      if (e.status === 401) { state.user = null; redirectLogin(); }
+      else if (root.isConnected) $("msgs").appendChild(banner("err", esc(state.runError)));
+    } finally {
+      state.running = false; clearInterval(elapsedTimer); refreshUserBox();
+      if (root.isConnected) {
+        panel.querySelectorAll("input,select,button").forEach((node) => { node.disabled = false; });
+        panel.removeAttribute("aria-busy"); $("run").textContent = "Run check";
+        applyOcrStatus(); updateRun();
+      } else if (document.getElementById("checkPanel")) checkView();
+    }
+  });
+  if (state.running) {
+    panel.querySelectorAll("input,select,button").forEach((node) => { node.disabled = true; });
+    $("run").textContent = "Running…"; showElapsed(); elapsedTimer = setInterval(showElapsed, 1000);
+  } else updateRun();
 }
 
 // Plain-language mapping, mirroring proofcheck/humanize.py (presentation only — the API
@@ -417,6 +409,7 @@ function summarySentence(s) {
   const body = parts.length ? parts.join("; ") : "nothing needed checking";
   let out = `We checked ${checked} value${checked === 1 ? "" : "s"} from your spreadsheet against the PDF: ${body}.`;
   if (s.skipped) out += ` ${s.skipped} blank cell${s.skipped === 1 ? " was" : "s were"} skipped.`;
+  if (s.duplicate_review) out += ` Review duplicates in ${s.duplicate_review} value(s); repetition may be intentional. Match rate does not clear these flags.`;
   return out;
 }
 
@@ -427,6 +420,19 @@ function sourceBadge(source) {
 }
 
 function detailText(r) {
+  const parts = [matchDetailText(r)];
+  if (r.occurrence_count > 1) {
+    const pages = (r.occurrences || []).map(o => `page ${o.page}: ${o.count}`).join("; ");
+    parts.push(`Review duplicates: ${r.occurrence_count} full-value occurrences (${pages}).`);
+  }
+  for (const word of r.repeated_words || []) {
+    const where = word.page == null ? "spreadsheet value" : `PDF on page ${word.page}`;
+    parts.push(`Review repeated word in ${where}: “${word.word}” (${word.count} consecutive uses).`);
+  }
+  return parts.join(" ");
+}
+
+function matchDetailText(r) {
   const where = r.page == null ? "the PDF" : `page ${r.page}`;
   if (r.status === "EXACT") return `Found on ${where}.`;
   if (r.status === "FUZZY")
@@ -444,6 +450,7 @@ function renderResults(data) {
   const card = (l, v) => `<div class="card"><div class="n">${v}</div><div class="l">${esc(l)}</div></div>`;
   const s = data.summary;
   const results = document.getElementById("results");
+  if (!results) return;
   results.classList.remove("hidden");
   const legend = ["EXACT", "FUZZY", "MISSING", "SKIPPED"].map((st) =>
     `<li><span class="badge b-${st}">${HUMAN[st].icon} ${esc(HUMAN[st].label)}</span> — ${esc(HUMAN[st].meaning)}</li>`
@@ -451,19 +458,22 @@ function renderResults(data) {
   results.innerHTML = `
     <div class="panel">
       <p class="lead">${esc(summarySentence(s))}</p>
+      ${data.timings?.total != null ? `<p class="muted">Completed in ${data.timings.total.toFixed(2)}s · matching ${(data.timings.match || 0).toFixed(3)}s</p>` : ""}
       <div class="cards">
         ${card("Values checked", s.total - s.skipped)}${card("Found", s.exact)}
         ${card("Found w/ differences", s.fuzzy)}${card("Not found", s.missing)}
         ${card("Blank", s.skipped)}${card("Match rate", (s.pass_rate * 100).toFixed(0) + "%")}
+        ${card("Review duplicates", s.duplicate_review ?? "Not recorded")}
       </div>
       ${data.warnings && data.warnings.length
         ? `<div class="banner" style="margin-top:1rem;"><b>Notes</b><ul>${data.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>`
         : ""}
       <details class="legend"><summary>How to read these results</summary>
+        <p>Review duplicates flags repeated words and multiple full-value occurrences. Check whether they are intentional; the match result and match rate measure text similarity only.</p>
         <ul>${legend}<li><b>Matched via</b> — where the PDF text came from: ${sourceBadge("text")} (the PDF's real text) or ${sourceBadge("OCR")} (read from a scanned/image page).</li><li class="muted">In the differences below, <del>red struck-through</del> text is in your spreadsheet but not the PDF; <ins>green</ins> text is in the PDF but not your spreadsheet.</li></ul>
       </details>
       <div style="margin-top:1rem;">
-        <a class="report" href="${esc(data.report_urls.html)}" target="_blank">Download printable report</a> &nbsp;
+        <a class="report" href="${esc(data.report_urls.html)}" target="_blank" rel="noopener">Download printable report</a> &nbsp;
         <a class="report" href="${esc(data.report_urls.xlsx)}">Download Excel report</a>
       </div>
     </div>
@@ -474,59 +484,69 @@ function renderResults(data) {
             <option value="">All results</option><option value="EXACT">Found</option>
             <option value="FUZZY">Found with differences</option><option value="MISSING">Not found</option>
             <option value="SKIPPED">Blank</option>
+            <option value="REVIEW">Review duplicates</option>
           </select>
         </label>
-        <input type="search" id="search" placeholder="Search values…">
+        <input type="search" id="search" aria-label="Search result values" placeholder="Search values…">
       </div>
-      <div id="tables"></div>
+      <div id="tables"></div><div id="pagination" class="toolbar" aria-label="Result pages"></div>
     </div>`;
-  document.getElementById("statusFilter").addEventListener("change", renderTables);
-  document.getElementById("search").addEventListener("input", renderTables);
+  state.rows = data.columns.flatMap((col) => col.results.map((r) => ({ ...r, column: col.name,
+    searchText: `${r.expected} ${r.best_match || ""}`.toLowerCase() })));
+  state.page = 0;
+  const reset = () => { state.page = 0; renderTables(); };
+  document.getElementById("statusFilter").addEventListener("change", reset);
+  let searchTimer;
+  const token = state.viewToken;
+  document.getElementById("search").addEventListener("input", () => {
+    clearTimeout(searchTimer); searchTimer = setTimeout(() => { if (token === state.viewToken) reset(); }, 180);
+  });
   renderTables();
 }
 
 function renderTables() {
-  const data = state.lastResult;
-  if (!data) return;
+  const container = document.getElementById("tables");
+  if (!container || !state.lastResult) return;
   const filter = document.getElementById("statusFilter").value;
   const query = document.getElementById("search").value.trim().toLowerCase();
-  const container = document.getElementById("tables"); container.innerHTML = "";
-
-  data.columns.forEach((col) => {
-    const rows = col.results.filter((r) => {
-      if (filter && r.status !== filter) return false;
-      if (query && !((r.expected + " " + (r.best_match || "")).toLowerCase().includes(query))) return false;
-      return true;
-    });
-    if (!rows.length) return;
-    container.appendChild(el("h3", {}, col.name));
+  const rows = state.rows.filter((r) => (!filter || (filter === "REVIEW" ? r.needs_review : r.status === filter)) && (!query || r.searchText.includes(query)));
+  const pageSize = 100, pages = Math.max(1, Math.ceil(rows.length / pageSize));
+  state.page = Math.min(state.page, pages - 1);
+  container.replaceChildren();
+  if (!rows.length) container.appendChild(el("p", { class: "muted" }, "No results match the current filter."));
+  else {
+    const visible = rows.slice(state.page * pageSize, (state.page + 1) * pageSize);
     const table = el("table", { html:
-      "<thead><tr><th>Row</th><th>Value in your spreadsheet</th><th>Result</th><th>Matched via</th><th>Details</th></tr></thead><tbody>" +
-      rows.map((r) => {
+      "<thead><tr><th scope='col'>Column</th><th scope='col'>Row</th><th scope='col'>Spreadsheet value</th><th scope='col'>Result</th><th scope='col'>Matched via</th><th scope='col'>Details</th></tr></thead><tbody>" +
+      visible.map((r) => {
+        const human = HUMAN[r.status] || HUMAN.MISSING;
         let details = esc(detailText(r));
-        if (r.status === "FUZZY" && r.diff && r.diff.length) {
-          details += `<div class="diffline"><span class="muted">Difference:</span> ${diffHtml(r.diff, r.best_match)}</div>`;
-        }
-        const value = esc(r.expected) || '<span class="muted">(empty)</span>';
-        return `<tr><td>${r.row}</td><td>${value}</td>` +
-          `<td><span class="badge b-${r.status}">${HUMAN[r.status].icon} ${esc(HUMAN[r.status].label)}</span></td>` +
-          `<td>${sourceBadge(r.source)}</td>` +
-          `<td>${details}</td></tr>`;
+        if (r.status === "FUZZY" && r.diff?.length) details += `<div class="diffline">${diffHtml(r.diff, r.best_match)}</div>`;
+        return `<tr><td>${esc(r.column)}</td><td>${r.row}</td><td>${esc(r.expected) || '<span class="muted">(empty)</span>'}</td>` +
+          `<td><span class="badge b-${esc(r.status)}">${human.icon} ${esc(human.label)}</span>${r.needs_review ? ' <span class="badge b-FUZZY">Review duplicates</span>' : ''}</td><td>${sourceBadge(r.source)}</td><td>${details}</td></tr>`;
       }).join("") + "</tbody>" });
-    container.appendChild(table);
-  });
-  if (!container.innerHTML) container.innerHTML = '<p class="muted">No results match the current filter.</p>';
+    container.appendChild(el("div", { class: "table-scroll", tabindex: "0", role: "region", "aria-label": "Check results" }, table));
+  }
+  const pager = document.getElementById("pagination");
+  pager.replaceChildren(
+    el("button", { disabled: state.page === 0, onclick: () => { state.page--; renderTables(); } }, "Previous"),
+    el("span", { role: "status", "aria-live": "polite" }, `${rows.length} results · Page ${state.page + 1} of ${pages}`),
+    el("button", { disabled: state.page + 1 >= pages, onclick: () => { state.page++; renderTables(); } }, "Next")
+  );
 }
 
 // ---- History views ----------------------------------------------------------
 async function historyView() {
   clearView();
   view().appendChild(el("div", { class: "panel", id: "histPanel", html: '<p class="muted">Loading history…</p>' }));
+  const token = state.viewToken;
   try {
     const data = await api.history();
+    if (token !== state.viewToken) return;
     renderHistory(data.runs);
   } catch (e) {
     if (e.status === 401) return redirectLogin();
+    if (token !== state.viewToken) return;
     document.getElementById("histPanel").innerHTML = "";
     document.getElementById("histPanel").appendChild(banner("err", "Could not load history: " + esc(e.message)));
   }
@@ -541,7 +561,7 @@ function renderHistory(runs) {
     "<th>Found</th><th>With differences</th><th>Not found</th><th></th></tr></thead><tbody>" +
     runs.map((r) =>
       `<tr class="history-row" data-id="${esc(r.run_id)}">
-        <td>${esc(r.created_at)}</td><td>${esc(r.excel)}</td><td>${esc(r.pdf)}</td>
+        <td>${esc(r.created_at)}</td><td><a href="#/history/${esc(r.run_id)}">${esc(r.excel)}</a></td><td>${esc(r.pdf)}</td>
         <td>${(r.summary.pass_rate * 100).toFixed(0)}%</td>
         <td>${r.summary.exact}</td><td>${r.summary.fuzzy}</td><td>${r.summary.missing}</td>
         <td><button class="danger" data-del="${esc(r.run_id)}">Delete</button></td>
@@ -558,8 +578,10 @@ function renderHistory(runs) {
     btn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       const id = btn.getAttribute("data-del");
-      try { await api.deleteHistory(id); historyView(); }
-      catch (e) { alert("Delete failed: " + e.message); }
+      const token = state.viewToken;
+      btn.disabled = true;
+      try { await api.deleteHistory(id); if (token === state.viewToken) historyView(); }
+      catch (e) { btn.disabled = false; if (token === state.viewToken) alert("Delete failed: " + e.message); }
     });
   });
 }
@@ -567,8 +589,10 @@ function renderHistory(runs) {
 async function historyDetailView(id) {
   clearView();
   view().appendChild(el("div", { class: "panel", id: "detail", html: '<p class="muted">Loading…</p>' }));
+  const token = state.viewToken;
   try {
     const r = await api.historyItem(id);
+    if (token !== state.viewToken) return;
     const card = (l, v) => `<div class="card"><div class="n">${v}</div><div class="l">${l}</div></div>`;
     const flags = Object.entries(r.meta.flags || {}).filter(([, v]) => v).map(([k]) => k);
     document.getElementById("detail").innerHTML = `
@@ -580,14 +604,16 @@ async function historyDetailView(id) {
         ${card("Values checked", r.summary.total - r.summary.skipped)}${card("Found", r.summary.exact)}
         ${card("With differences", r.summary.fuzzy)}${card("Not found", r.summary.missing)}
         ${card("Blank", r.summary.skipped)}${card("Match rate", (r.summary.pass_rate * 100).toFixed(0) + "%")}
+        ${card("Review duplicates", r.summary.duplicate_review ?? "Not recorded")}
       </div>
       <div style="margin-top:1rem;">
-        <a class="report" href="/reports/${esc(r.run_id)}.html" target="_blank">Printable report</a> &nbsp;
+        <a class="report" href="/reports/${esc(r.run_id)}.html" target="_blank" rel="noopener">Printable report</a> &nbsp;
         <a class="report" href="/reports/${esc(r.run_id)}.xlsx">Excel report</a>
         <span class="muted">(reports expire ~1h after the run; the summary above persists)</span>
       </div>`;
   } catch (e) {
     if (e.status === 401) return redirectLogin();
+    if (token !== state.viewToken) return;
     document.getElementById("detail").innerHTML = "";
     document.getElementById("detail").appendChild(banner("err", "Could not load run: " + esc(e.message)));
   }
@@ -596,6 +622,7 @@ async function historyDetailView(id) {
 // ---- Login view -------------------------------------------------------------
 function loginView() {
   clearView();
+  if (state.running) { view().appendChild(banner("warn", 'A check is running. <a href="#/check">Return to the check</a> before switching users.')); return; }
   const root = el("div", { class: "auth-wrap" },
     el("div", { class: "panel", html: `
       <h2>Sign in</h2>
@@ -605,18 +632,24 @@ function loginView() {
       <button class="primary" id="loginBtn">Sign in</button>` })
   );
   view().appendChild(root);
+  const token = state.viewToken;
+  let submitting = false;
   const submit = async () => {
+    if (submitting) return;
+    submitting = true;
+    const button = document.getElementById("loginBtn"); button.disabled = true;
     const u = document.getElementById("u").value.trim();
     const p = document.getElementById("p").value;
     document.getElementById("loginMsg").innerHTML = "";
     try {
       const res = await api.login(u, p);
+      if (token !== state.viewToken) return;
       state.user = res;
       refreshUserBox();
       location.hash = "#/check";
     } catch (e) {
-      document.getElementById("loginMsg").appendChild(banner("err", esc(e.message)));
-    }
+      if (token === state.viewToken) document.getElementById("loginMsg").appendChild(banner("err", esc(e.message)));
+    } finally { submitting = false; if (token === state.viewToken) button.disabled = false; }
   };
   document.getElementById("loginBtn").addEventListener("click", submit);
   document.getElementById("p").addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
@@ -629,6 +662,7 @@ function refreshUserBox() {
   if (authOn && state.user && state.user.authenticated) {
     document.getElementById("userName").textContent = state.user.username;
     box.classList.remove("hidden");
+    document.getElementById("logoutBtn").disabled = state.running;
   } else {
     box.classList.add("hidden");
   }
@@ -639,7 +673,7 @@ function setActiveNav(route) {
     a.classList.toggle("active", a.getAttribute("data-route") === route));
 }
 
-function redirectLogin() { location.hash = "#/login"; }
+function redirectLogin() { state.user = null; state.lastResult = null; state.rows = []; refreshUserBox(); location.hash = "#/login"; }
 
 // ---- theme (dark / light) ---------------------------------------------------
 function applyTheme(theme) {
@@ -682,7 +716,9 @@ async function boot() {
   initTheme();
   document.getElementById("themeBtn").addEventListener("click", toggleTheme);
   document.getElementById("logoutBtn").addEventListener("click", async () => {
+    if (state.running) return;
     try { await api.logout(); } catch (_) { /* ignore */ }
+    state.lastResult = null; state.inspectData = null; state.rows = [];
     state.user = { username: "", authenticated: false };
     refreshUserBox();
     redirectLogin();

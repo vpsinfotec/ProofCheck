@@ -23,65 +23,30 @@ def _fail(message: str) -> None:
     sys.exit(2)
 
 
-class _ProgressBar:
-    """Render pipeline progress as a single, in-place updating line on stderr.
-
-    Consumes the ``(stage, current, total)`` events emitted by :func:`pipeline.run`. Each
-    stage ("Extract", "Matching") gets its own bar; redraws are throttled to whole-percent
-    changes so a huge sheet doesn't flood the terminal. When a stage reaches ``current ==
-    total`` the bar is completed with a "done" marker and a trailing newline, giving a
-    definite completion indication before the next stage (or the final summary) prints.
-    """
-
-    _LABELS = {"extract": "Extract", "match": "Matching"}
-    _WIDTH = 28
-
-    def __init__(self) -> None:
-        self._stage: str | None = None
-        self._last_pct = -1
-
-    def __call__(self, stage: str, current: int, total: int) -> None:
-        if total <= 0:
-            return
-        # Starting a new stage resets the throttle so its first frame always draws.
-        if stage != self._stage:
-            self._stage = stage
-            self._last_pct = -1
-        pct = int(current * 100 / total)
-        done = current >= total
-        if pct == self._last_pct and not done:
-            return
-        self._last_pct = pct
-        label = self._LABELS.get(stage, stage)
-        filled = int(self._WIDTH * current / total)
-        # ASCII bar (not unicode block glyphs) so it renders on legacy Windows consoles too.
-        bar = "#" * filled + "-" * (self._WIDTH - filled)
-        tail = "  done\n" if done else ""
-        click.echo(f"\r{label:<9}[{bar}] {current}/{total} ({pct:3d}%){tail}",
-                   nl=False, err=True)
-
-
 @click.group()
 @click.version_option(__version__, prog_name="proofcheck")
 def cli() -> None:
-    """ProofCheck — verify that Excel values appear in a PDF (deterministic, no AI)."""
+    """ProofCheck — verify that Excel values appear in a PDF (local processing)."""
 
 
 @cli.command()
 @click.argument("excel_path", type=click.Path(exists=True, dir_okay=False))
 @click.option("--sheet", default=None, help="Sheet name (default: active sheet).")
-@click.option("--header-row", default=1, show_default=True, help="1-based header row.")
+@click.option("--header-row", default=1, type=click.IntRange(1, 1048576), show_default=True, help="1-based header row.")
 def inspect(excel_path: str, sheet: str | None, header_row: int) -> None:
     """List sheets and column headers of an Excel file."""
     try:
         names = excel.sheet_names(excel_path)
-        headers = excel.inspect(excel_path)
+        headers = excel.inspect(excel_path, header_row=header_row)
+        if sheet is not None and sheet not in headers:
+            raise excel.ExcelError(f"Sheet {sheet!r} not found.")
     except excel.ExcelError as exc:
         _fail(str(exc))
     click.echo(f"Sheets: {', '.join(names)}")
     for name, cols in headers.items():
-        marker = " (active)" if sheet is None else ""
-        click.echo(f"  [{name}]{marker}: {', '.join(c for c in cols if c)}")
+        if sheet is not None and name != sheet:
+            continue
+        click.echo(f"  [{name}]: {', '.join(c for c in cols if c)}")
 
 
 @cli.command()
@@ -91,7 +56,7 @@ def inspect(excel_path: str, sheet: str | None, header_row: int) -> None:
 @click.option("--column", "-c", "columns", multiple=True, help="Column header to check (repeatable).")
 @click.option("--all-columns", is_flag=True, help="Check every column on the sheet.")
 @click.option("--sheet", default=None, help="Sheet name (default: active sheet).")
-@click.option("--header-row", default=1, show_default=True, help="1-based header row.")
+@click.option("--header-row", default=1, type=click.IntRange(1, 1048576), show_default=True, help="1-based header row.")
 @click.option("--fuzzy-threshold", default=90, show_default=True, type=click.IntRange(0, 100))
 @click.option("--normalize-digits", is_flag=True, help="Fold unicode digits to ASCII.")
 @click.option("--strip-punctuation", is_flag=True, help="Ignore punctuation when matching.")
@@ -99,16 +64,12 @@ def inspect(excel_path: str, sheet: str | None, header_row: int) -> None:
               help="Fold accents/diacritics so accented names match their unaccented form.")
 @click.option("--reverse", is_flag=True, help="Also try reversed word order (e.g. 'Last First').")
 @click.option("--ocr", is_flag=True, help="OCR pages with no text layer (needs the optional OCR extra).")
-@click.option("--ocr-dpi", default=300, show_default=True, type=click.IntRange(72, 1200),
+@click.option("--ocr-dpi", default=300, show_default=True, type=click.IntRange(72, 600),
               help="Render DPI used for OCR.")
 @click.option("--ocr-lang", default="eng", show_default=True, help="Tesseract language(s), e.g. 'eng+ara'.")
 @click.option("--ocr-psm", default=6, show_default=True, type=click.IntRange(0, 13),
               help="Tesseract page-segmentation mode (6=block, 3=auto, 4=columns, 11=sparse).")
 @click.option("--no-ocr-cache", is_flag=True, help="Force fresh OCR (ignore the OCR cache).")
-@click.option("--workers", "-j", default=0, show_default=True, type=click.IntRange(0, 64),
-              help="Parallel workers for OCR and matching (0 = auto from CPU count, capped at 8; 1 = sequential).")
-@click.option("--progress/--no-progress", "progress", default=None,
-              help="Show a progress bar (default: on when stderr is a terminal).")
 @click.option("--html", "html_out", type=click.Path(dir_okay=False), help="Write an HTML report here.")
 @click.option("--xlsx", "xlsx_out", type=click.Path(dir_okay=False), help="Write an xlsx report here.")
 def check(
@@ -128,12 +89,14 @@ def check(
     ocr_lang: str,
     ocr_psm: int,
     no_ocr_cache: bool,
-    workers: int,
-    progress: bool | None,
     html_out: str | None,
     xlsx_out: str | None,
 ) -> None:
     """Check EXCEL_PATH values against PDF_PATH and print a summary."""
+    inputs = {os.path.realpath(excel_path), os.path.realpath(pdf_path)}
+    outputs = [os.path.realpath(p) for p in (html_out, xlsx_out) if p]
+    if inputs.intersection(outputs) or len(set(outputs)) != len(outputs):
+        _fail("Reports need separate output paths; do not overwrite input files or each other.")
     config = RunConfig(
         excel_path=excel_path,
         pdf_path=pdf_path,
@@ -151,13 +114,9 @@ def check(
         ocr_lang=ocr_lang,
         ocr_psm=ocr_psm,
         ocr_cache=not no_ocr_cache,
-        workers=workers,
     )
-    # Auto-enable the bar for interactive terminals; suppress it when piped or with --no-progress.
-    show_progress = sys.stderr.isatty() if progress is None else progress
-    progress_cb = _ProgressBar() if show_progress else None
     try:
-        result = pipeline_run(config, progress=progress_cb)
+        result = pipeline_run(config)
     except PipelineError as exc:
         _fail(str(exc))
 
@@ -167,14 +126,23 @@ def check(
                f"Pass rate: {s.pass_rate * 100:.1f}%")
     for w in result.warnings:
         click.echo(f"  ! {w}", err=True)
+    if s.duplicate_review:
+        click.echo(f"  ! Review duplicates: {s.duplicate_review} values. "
+                   "See HTML/XLSX details for repeated words and page counts.", err=True)
 
     if html_out:
         from . import report_html
-        report_html.write(result, html_out)
+        try:
+            report_html.write(result, html_out)
+        except (OSError, ValueError) as exc:
+            _fail(f"Could not write HTML report: {exc}")
         click.echo(f"HTML report: {html_out}")
     if xlsx_out:
         from . import report_xlsx
-        report_xlsx.write(result, xlsx_out)
+        try:
+            report_xlsx.write(result, xlsx_out)
+        except (OSError, ValueError) as exc:
+            _fail(f"Could not write Excel report: {exc}")
         click.echo(f"xlsx report: {xlsx_out}")
 
     # Non-zero exit when anything is missing, so CI/scripts can gate on it.
@@ -192,7 +160,7 @@ def _parse_pages(spec: str, page_count: int) -> list[int]:
         if "-" in part:
             lo, _, hi = part.partition("-")
             try:
-                for p in range(int(lo), int(hi) + 1):
+                for p in range(max(1, int(lo)), min(page_count, int(hi)) + 1):
                     pages.add(p)
             except ValueError:
                 continue
@@ -207,7 +175,7 @@ def _parse_pages(spec: str, page_count: int) -> list[int]:
               help="Pages/images to OCR, e.g. '1,3,5-7'. Default: pages with no text layer (all, for images).")
 @click.option("--all-pages", is_flag=True, help="OCR every page, even those with a text layer.")
 @click.option("--ocr-lang", default="eng", show_default=True, help="Tesseract language(s), e.g. 'eng+ara'.")
-@click.option("--ocr-dpi", default=300, show_default=True, type=click.IntRange(72, 1200))
+@click.option("--ocr-dpi", default=300, show_default=True, type=click.IntRange(72, 600))
 @click.option("--ocr-psm", default=6, show_default=True, type=click.IntRange(0, 13),
               help="Page-segmentation mode (6=block, 3=auto, 4=columns, 11=sparse).")
 @click.option("--save-images", type=click.Path(file_okay=False),

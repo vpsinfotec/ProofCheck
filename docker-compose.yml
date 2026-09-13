@@ -11,19 +11,22 @@ services:
     build: .
     image: proofcheck:latest
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       # --- Security / sessions -------------------------------------------------
-      PROOFCHECK_SECRET: "CHANGE-ME-to-a-long-random-hex"  # stable HMAC key for sessions
+      PROOFCHECK_SECRET: "${PROOFCHECK_SECRET:-}"  # set a stable random key before enabling auth
       PROOFCHECK_AUTH: "off"                                # "on" to require login
       # PROOFCHECK_ADMIN_USER: "admin"                      # bootstrap admin (auth on)
       # PROOFCHECK_ADMIN_PASSWORD: "change-me-now"
       # --- Limits / CORS -------------------------------------------------------
-      MAX_UPLOAD_MB: "25"
+      MAX_UPLOAD_MB: "50"
+      PROOFCHECK_MAX_CONCURRENT_CHECKS: "2"
+      PROOFCHECK_OCR_WORKERS: "2"
       # CORS_ORIGINS: "https://proofcheck.example.com"
       # --- Persistence (kept on the volume below) ------------------------------
       PROOFCHECK_DB: "/data/proofcheck.db"
       PROOFCHECK_OCR_CACHE: "/data/ocr_cache"
+      PROOFCHECK_REPORT_DIR: "/data/reports"
     volumes:
       - proofcheck-data:/data          # auth/history DB + OCR cache survive restarts
     restart: unless-stopped
