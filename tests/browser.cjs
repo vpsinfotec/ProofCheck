@@ -19,6 +19,9 @@ w.save(p/'delegates.xlsx')
 c=canvas.Canvas(str(p/'program.pdf'))
 for offset in range(0,350,35):
  for i in range(35): c.drawString(40,800-20*i,f'Person {offset+i}')
+ if offset == 0:
+  c.drawString(40,70,'Person Person 349')
+  c.drawString(40,50,'Person 349')
  c.showPage()
 c.save()
 `]);
@@ -51,6 +54,16 @@ const delay=(ms)=>new Promise(r=>setTimeout(r,ms));
     assert.match(await page.locator('#tables tbody tr').first().innerText(),/Person 100/);
     await page.locator('#search').fill('Person 349');
     await page.waitForFunction(()=>document.querySelectorAll('#tables tbody tr').length===1);
+    assert.equal(payload.summary.duplicate_review,1);
+    const repeated=payload.columns[0].results.find(r=>r.expected==='Person 349');
+    assert.equal(repeated.occurrence_count,3);
+    assert.deepEqual(repeated.occurrences,[{page:1,count:2},{page:10,count:1}]);
+    assert.match(await page.locator('#tables').innerText(),/Review duplicates/);
+    assert.match(await page.locator('#tables').innerText(),/Review repeated word in PDF on page 1/);
+    await page.locator('#search').fill('');
+    await page.locator('#statusFilter').selectOption('REVIEW');
+    await page.waitForFunction(()=>document.querySelectorAll('#tables tbody tr').length===1);
+    assert.match(await page.locator('#tables').innerText(),/Person 349/);
     assert.equal((await page.request.get(base+payload.report_urls.xlsx)).status(),200);
     // A cancelled file picker retains its current file and valid Run state.
     await page.locator('#excel').dispatchEvent('cancel');
@@ -66,7 +79,7 @@ const delay=(ms)=>new Promise(r=>setTimeout(r,ms));
     assert.ok(sizes.scroll<=sizes.width+2,JSON.stringify(sizes));
     assert.deepEqual(errors,[]);
     if(process.env.PROOFCHECK_SCREENSHOT)await page.screenshot({path:process.env.PROOFCHECK_SCREENSHOT,fullPage:true});
-    console.log('PASS: live upload/check, comma header, 350 exact matches, pagination/search, report download, picker cancellation, route return, mobile layout, no page errors.');
+    console.log('PASS: live upload/check, comma header, 350 exact matches, duplicate counts/words/filter, pagination/search, report download, picker cancellation, route return, mobile layout, no page errors.');
   } finally {
     if(browser)await browser.close();
     server.kill();await new Promise(resolve=>{if(server.exitCode!==null)resolve();else server.once('exit',resolve);});

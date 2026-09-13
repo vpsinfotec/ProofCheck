@@ -109,3 +109,26 @@ test('failed inspection clears stale columns and keeps Run disabled',async()=>{
   assert.match(ctx.get('msgs').textContent,/Invalid workbook/);
   await tick(); ctx.dom.window.close();
 });
+
+test('duplicate review is visible, filterable and safely escaped alongside exact results',async()=>{
+  const ctx=setup(), data=result(3);
+  data.summary.duplicate_review=2;
+  Object.assign(data.columns[0].results[0],{expected:'Areeb Khan',needs_review:true,occurrence_count:3,
+    occurrences:[{page:1,count:2},{page:4,count:1}],repeated_words:[]});
+  Object.assign(data.columns[0].results[1],{expected:'Areeb Areeb Khan',needs_review:true,occurrence_count:1,
+    occurrences:[{page:1,count:1}],repeated_words:[{word:'<img src=x onerror=alert(1)>',count:2,page:null},{word:'areeb',count:2,page:1}]});
+  ctx.app.state.lastResult=data;ctx.app.renderResults(data);
+  assert.match(ctx.get('results').textContent,/Review duplicates in 2 value/);
+  assert.match(ctx.get('tables').textContent,/page 1: 2; page 4: 1/);
+  assert.match(ctx.get('tables').textContent,/Review repeated word in spreadsheet value/);
+  assert.match(ctx.get('tables').textContent,/PDF on page 1: “areeb”/);
+  assert.equal(ctx.w.document.querySelector('#tables img'),null);
+  ctx.get('statusFilter').value='REVIEW';
+  ctx.get('statusFilter').dispatchEvent(new ctx.w.Event('change'));
+  assert.equal(ctx.w.document.querySelectorAll('#tables tbody tr').length,2);
+  ctx.get('search').value='Areeb Areeb';ctx.app.renderTables();
+  assert.equal(ctx.w.document.querySelectorAll('#tables tbody tr').length,1);
+  ctx.get('statusFilter').value='EXACT';ctx.get('search').value='';ctx.app.renderTables();
+  assert.equal(ctx.w.document.querySelectorAll('#tables tbody tr').length,3);
+  await tick();ctx.dom.window.close();
+});

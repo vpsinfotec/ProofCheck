@@ -409,6 +409,7 @@ function summarySentence(s) {
   const body = parts.length ? parts.join("; ") : "nothing needed checking";
   let out = `We checked ${checked} value${checked === 1 ? "" : "s"} from your spreadsheet against the PDF: ${body}.`;
   if (s.skipped) out += ` ${s.skipped} blank cell${s.skipped === 1 ? " was" : "s were"} skipped.`;
+  if (s.duplicate_review) out += ` Review duplicates in ${s.duplicate_review} value(s); repetition may be intentional. Match rate does not clear these flags.`;
   return out;
 }
 
@@ -419,6 +420,19 @@ function sourceBadge(source) {
 }
 
 function detailText(r) {
+  const parts = [matchDetailText(r)];
+  if (r.occurrence_count > 1) {
+    const pages = (r.occurrences || []).map(o => `page ${o.page}: ${o.count}`).join("; ");
+    parts.push(`Review duplicates: ${r.occurrence_count} full-value occurrences (${pages}).`);
+  }
+  for (const word of r.repeated_words || []) {
+    const where = word.page == null ? "spreadsheet value" : `PDF on page ${word.page}`;
+    parts.push(`Review repeated word in ${where}: “${word.word}” (${word.count} consecutive uses).`);
+  }
+  return parts.join(" ");
+}
+
+function matchDetailText(r) {
   const where = r.page == null ? "the PDF" : `page ${r.page}`;
   if (r.status === "EXACT") return `Found on ${where}.`;
   if (r.status === "FUZZY")
@@ -449,11 +463,13 @@ function renderResults(data) {
         ${card("Values checked", s.total - s.skipped)}${card("Found", s.exact)}
         ${card("Found w/ differences", s.fuzzy)}${card("Not found", s.missing)}
         ${card("Blank", s.skipped)}${card("Match rate", (s.pass_rate * 100).toFixed(0) + "%")}
+        ${card("Review duplicates", s.duplicate_review ?? "Not recorded")}
       </div>
       ${data.warnings && data.warnings.length
         ? `<div class="banner" style="margin-top:1rem;"><b>Notes</b><ul>${data.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>`
         : ""}
       <details class="legend"><summary>How to read these results</summary>
+        <p>Review duplicates flags repeated words and multiple full-value occurrences. Check whether they are intentional; the match result and match rate measure text similarity only.</p>
         <ul>${legend}<li><b>Matched via</b> — where the PDF text came from: ${sourceBadge("text")} (the PDF's real text) or ${sourceBadge("OCR")} (read from a scanned/image page).</li><li class="muted">In the differences below, <del>red struck-through</del> text is in your spreadsheet but not the PDF; <ins>green</ins> text is in the PDF but not your spreadsheet.</li></ul>
       </details>
       <div style="margin-top:1rem;">
@@ -468,6 +484,7 @@ function renderResults(data) {
             <option value="">All results</option><option value="EXACT">Found</option>
             <option value="FUZZY">Found with differences</option><option value="MISSING">Not found</option>
             <option value="SKIPPED">Blank</option>
+            <option value="REVIEW">Review duplicates</option>
           </select>
         </label>
         <input type="search" id="search" aria-label="Search result values" placeholder="Search values…">
@@ -492,7 +509,7 @@ function renderTables() {
   if (!container || !state.lastResult) return;
   const filter = document.getElementById("statusFilter").value;
   const query = document.getElementById("search").value.trim().toLowerCase();
-  const rows = state.rows.filter((r) => (!filter || r.status === filter) && (!query || r.searchText.includes(query)));
+  const rows = state.rows.filter((r) => (!filter || (filter === "REVIEW" ? r.needs_review : r.status === filter)) && (!query || r.searchText.includes(query)));
   const pageSize = 100, pages = Math.max(1, Math.ceil(rows.length / pageSize));
   state.page = Math.min(state.page, pages - 1);
   container.replaceChildren();
@@ -506,7 +523,7 @@ function renderTables() {
         let details = esc(detailText(r));
         if (r.status === "FUZZY" && r.diff?.length) details += `<div class="diffline">${diffHtml(r.diff, r.best_match)}</div>`;
         return `<tr><td>${esc(r.column)}</td><td>${r.row}</td><td>${esc(r.expected) || '<span class="muted">(empty)</span>'}</td>` +
-          `<td><span class="badge b-${esc(r.status)}">${human.icon} ${esc(human.label)}</span></td><td>${sourceBadge(r.source)}</td><td>${details}</td></tr>`;
+          `<td><span class="badge b-${esc(r.status)}">${human.icon} ${esc(human.label)}</span>${r.needs_review ? ' <span class="badge b-FUZZY">Review duplicates</span>' : ''}</td><td>${sourceBadge(r.source)}</td><td>${details}</td></tr>`;
       }).join("") + "</tbody>" });
     container.appendChild(el("div", { class: "table-scroll", tabindex: "0", role: "region", "aria-label": "Check results" }, table));
   }
@@ -587,6 +604,7 @@ async function historyDetailView(id) {
         ${card("Values checked", r.summary.total - r.summary.skipped)}${card("Found", r.summary.exact)}
         ${card("With differences", r.summary.fuzzy)}${card("Not found", r.summary.missing)}
         ${card("Blank", r.summary.skipped)}${card("Match rate", (r.summary.pass_rate * 100).toFixed(0) + "%")}
+        ${card("Review duplicates", r.summary.duplicate_review ?? "Not recorded")}
       </div>
       <div style="margin-top:1rem;">
         <a class="report" href="/reports/${esc(r.run_id)}.html" target="_blank" rel="noopener">Printable report</a> &nbsp;
